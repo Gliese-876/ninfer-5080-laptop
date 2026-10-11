@@ -37,6 +37,16 @@ finish() {
             kill -KILL "$TEST_PID" 2>/dev/null
             wait "$TEST_PID" 2>/dev/null
         fi
+        if (( ! STOP_ATTEMPTED )); then
+            # A preflight failure after arming did not stop C1. Disarm only after
+            # independent evidence that production is still healthy.
+            if curl -fsS --max-time 3 http://127.0.0.1:8080/health >/dev/null 2>&1; then
+                echo "PRODUCTION_UNINTERRUPTED=PASS"
+                touch "$ROOT/disarmed"
+            else
+                echo "PRODUCTION_HEALTH_UNKNOWN; WATCHDOG REMAINS ARMED"
+            fi
+        fi
         if (( STOP_ATTEMPTED )); then
             sudo -n "$WRAPPER" start
             for _ in $(seq 1 24); do
