@@ -31,3 +31,7 @@ All three streams completed and `TRACE_AUDIT_RC=0`. The production service was s
 3. Reconcile each completed stream (including scheduled start offsets and finish reason) with the admission timeline; explain exactly what can and cannot be inferred about the 18.176s case. Keep incomplete/canceled events in denominators.
 4. Prepare an independently reviewable **separate draft PR** for the smallest justified instrumentation or scheduling fix, with deterministic tests and an explicit proof plan against the 75-request starvation corpus. If evidence cannot isolate cause, draft telemetry/test improvements rather than guessing at scheduler changes.
 5. Do not run more GPU experiments, stop production C1, change model/backend, merge PRs or close Issue #58 without a new explicit gate.
+
+### Cross-branch dependency: strict evidence gate
+
+The PR #78 campaign invocation now opts into `--require-evidence`, which is **not yet available in the `main` version** of `issue58_c2_trace_audit.py`. It depends on the separate Issue #58 forensic trace-audit draft PR. Until that parser option is integrated into the campaign checkout and validated together, **do not execute the campaign**: the audit would fail argument parsing even after a successful model run. No additional GPU test is authorised. Keep both PRs draft and reconcile the dependency during review.
