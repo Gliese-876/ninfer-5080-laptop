@@ -71,5 +71,44 @@ class TestIssue58C2TraceAudit(unittest.TestCase):
         r = self.capture("[ADMISSION-DEFERRAL] head=3 queued=2 reason=short_lane_policy_hold\n")
         self.assertEqual(r["counts"]["deferral_short_lane_policy_hold"], 1)
 
+    def test_zero_evidence_gate_flags_dead_capture(self):
+        # Reproduces the PR78 defect: a startup-FAIL/crashed C2 server leaves a
+        # zero-record raw.stderr.log that the old gate audited as success (rc 0),
+        # masking the failure. With the gate, zero evidence must fail closed (rc 7).
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "dead.stderr.log"
+            path.write_text("", encoding="utf-8")
+            r = self.audit(path, require_evidence=True)
+            self.assertEqual(len(r["no_admission_evidence_files"]), 1)
+            self.assertEqual(r["no_admission_evidence_files"][0], str(path))
+            self.assertEqual(r["selected_admission_queue_ms"]["n"], 0)
+            self.assertEqual(self.exit_code(r, require_evidence=True), 7)
+
+    def test_zero_evidence_gate_disabled_by_default(self):
+        # Backward compatibility: without the flag, an empty capture is still rc 0.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "empty.stderr.log"
+            path.write_text("", encoding="utf-8")
+            r = self.audit(path, require_evidence=False)
+            self.assertEqual(len(r["no_admission_evidence_files"]), 0)
+            self.assertEqual(self.exit_code(r, require_evidence=False), 0)
+
+    def test_gate_passes_when_evidence_present(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "ok.stderr.log"
+            path.write_text("[ADMISSION-QUEUE-TIMING] id=7 lane=0 queue_wait_ms=125 event=selected_for_admission\n",
+                            encoding="utf-8")
+            r = self.audit(path, require_evidence=True)
+            self.assertEqual(len(r["no_admission_evidence_files"]), 0)
+            self.assertEqual(self.exit_code(r, require_evidence=True), 0)
+
+    def audit(self, path, require_evidence):
+        return audit([path], require_evidence=require_evidence)
+
+    def exit_code(self, report, require_evidence):
+        if require_evidence and report["no_admission_evidence_files"]:
+            return 7
+        return int(bool(report["unrecognised_or_invalid_lines"]))
+
 if __name__ == "__main__":
     unittest.main()
