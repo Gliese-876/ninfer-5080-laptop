@@ -55,7 +55,8 @@ def audit(paths, require_evidence=False):
                     if name == "queue":
                         rid, lane, ms = map(int, fields)
                         queue_values.append(ms)
-                        observed.append({"source": str(path), "line": index, "kind": "selected_admission",
+                        observed.append({"source": str(path), "line": index, "file_order": len(paths) - list(paths).index(path) - 1,
+                                         "kind": "selected_admission",
                                          "request_id": rid, "lane": lane, "queue_wait_ms": ms})
                         records += 1
                     elif name == "lane":
@@ -75,7 +76,8 @@ def audit(paths, require_evidence=False):
                             errors.append(f"{path}:{index}: invalid KV denial cause")
                         counts["kv_" + fields[3]] += 1
                         counts["kv_with_head_id" if has_head else "kv_lane_only"] += 1
-                        kv_denials.append({"source": str(path), "line": index, "kind": "kv_denial",
+                        kv_denials.append({"source": str(path), "line": index, "file_order": len(paths) - list(paths).index(path) - 1,
+                                           "kind": "kv_denial",
                                            "request_id": int(head), "lane": int(fields[0]),
                                            "lane_id_joinable": has_head,
                                            "path": fields[1], "pool": fields[2], "cause": fields[3]})
@@ -117,12 +119,14 @@ def audit(paths, require_evidence=False):
              "request_id": a["request_id"],
              "admission_line": a["source"] + ":" + str(a["line"]),
              "lane": d["lane"],
-             "note": "same file, denial before admission, shared request id + lane; no causal proof",
+             "note": "shared request id + lane; same file, denial strictly before admission; sampling/throttling applies, no causal proof",
             }
             for d in kv_denials
             if d["lane_id_joinable"] and d["request_id"] != 0
             for a in observed
-            if a["source"] == d["source"] and d["line"] < a["line"]
+            if d["source"] == a["source"]
+            and d["file_order"] == a["file_order"]
+            and d["line"] < a["line"]
             and a["request_id"] == d["request_id"]
             and (d["lane"] == a["lane"] or a["lane"] is None)
         ],
@@ -130,9 +134,9 @@ def audit(paths, require_evidence=False):
         "no_admission_evidence_files": gate,
         "limitations": [
             "Request id in selected_admission logs is scheduler-local; never join across sessions/restarts without a verified common namespace.",
-            "KV denial logs have lane but NO request id; per-lane and admission traces are sampled; no causal join is claimed for lane-only denials.",
-            "A kv_denial_joins entry is a same-file, denial-before-admission shared-id-and-lane association; request ids may repeat across files, and sampling/throttling prevents causal proof.",
-            "A head id never proves the denial's true originating request; denials are logged from the probing request's perspective at the admission lane.",
+            "Legacy lane-only KV denial lines (no head id) are explicit unjoinable/legacy: no causal or shared-id join is ever claimed for them.",
+            "A kv_denial_joins entry joins a head-id-bearing KV denial line to a selected-admission line only when BOTH share the SAME request id and lane AND the two lines come from the same input file with the denial strictly before the admission in file order (cross-file and chronology guard). The join is a shared-id association, never a causal or temporal-order proof (sampling/throttling applies).",
+            "A head id on a KV denial line identifies the probing request's perspective, not the denial's causal origin; a head-bearing denial still never proves the denial's true originating request.",
             "Selected admission durations exclude rejected, cancelled, expired and never-admitted requests (survivor bias).",
             "No GPU-start time, first-token time, GPU schedule ownership or end-to-end TTFT is measured here.",
             "The report cannot establish starvation root cause or authorize C2 rollout.",

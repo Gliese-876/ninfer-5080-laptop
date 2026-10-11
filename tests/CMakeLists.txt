@@ -72,6 +72,8 @@ ninfer_add_test(ninfer_decision_resources_test
   SOURCES test_decision_resources.cpp)
 ninfer_add_test(ninfer_admission_policy_test SOURCES test_admission_policy.cpp)
 ninfer_add_test(ninfer_kv_capacity_test SOURCES test_kv_capacity.cpp)
+ninfer_add_test(ninfer_issue58_kv_reservation_boundary_test
+                SOURCES test_issue58_kv_reservation_boundary.cpp)
 ninfer_add_test(ninfer_sampling_defaults_test
   SOURCES test_sampling_defaults.cpp
   LIBRARIES ninfer_engine)

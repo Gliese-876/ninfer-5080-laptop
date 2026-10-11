@@ -1836,11 +1836,18 @@ private:
             throw std::logic_error("selected admission lane has no request plan");
         }
         if (choice.evict_retained) {
+            // Telemetry identity (Issue #58): every emitted admission/KV evidence
+            // line in this request's admission carries this request's own id when
+            // true; when no request id is available (legacy call path) the field is
+            // omitted and the evidence is explicit unjoinable/legacy. The protected
+            // head's id is NOT used as this probing request's evidence identity -
+            // that would mis-join denials to the head and corrupt the chronology.
+            // Telemetry-only: the predicate arguments and the eviction loop are
+            // unchanged.
             for (std::uint32_t retained_lane = 0;
                  retained_lane < max_concurrency_ &&
                  !instance_.program->can_admit_lane(
-                     lane, *request->lane_plans[lane],
-                     protection_ ? protection_->head_request_id : 0ULL);
+                     lane, *request->lane_plans[lane], request->id);
                  ++retained_lane) {
                 if (retained_lane != lane && slots_[retained_lane] == nullptr &&
                     instance_.program->has_retained_lane(retained_lane)) {
@@ -1848,9 +1855,11 @@ private:
                     invalidate_lane_plans(retained_lane);
                 }
             }
+            // Final feasibility re-check: emitted denial evidence is this
+            // request's, so use this request's id (Issue #58 telemetry identity;
+            // legacy/0 => field omitted and line is explicit unjoinable).
             if (!instance_.program->can_admit_lane(
-                    lane, *request->lane_plans[lane],
-                    protection_ ? protection_->head_request_id : 0ULL)) {
+                    lane, *request->lane_plans[lane], request->id)) {
                 throw std::logic_error("retained eviction did not make admission feasible");
             }
         }
