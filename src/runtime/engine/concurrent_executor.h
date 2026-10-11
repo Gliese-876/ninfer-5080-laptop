@@ -1773,7 +1773,8 @@ private:
             ensure_lane_plan(request, lane);
             const Plan& plan          = *request->lane_plans[lane];
             const std::uint32_t reuse = plan.summary().reusable_prompt_tokens;
-            const bool direct_fit = instance_.program->can_admit_lane(lane, plan);
+            const bool direct_fit =
+                instance_.program->can_admit_lane(lane, plan, request->id);
             if (evidence) { (*evidence)[lane] = issue58_lane_evidence(false, true, direct_fit, false); }
             if (direct_fit && (!selected || reuse > selected_reuse)) {
                 selected       = LaneChoice{.lane = lane};
@@ -1787,7 +1788,8 @@ private:
             ensure_lane_plan(request, lane);
             const Plan& plan          = *request->lane_plans[lane];
             const std::uint32_t reuse = plan.summary().reusable_prompt_tokens;
-            const bool eviction_fit = instance_.program->can_admit_lane_after_retained_eviction(lane, plan);
+            const bool eviction_fit =
+                instance_.program->can_admit_lane_after_retained_eviction(lane, plan, request->id);
             if (evidence) {
                 (*evidence)[lane] = issue58_lane_evidence(false, true, false, eviction_fit);
             }
@@ -1836,7 +1838,9 @@ private:
         if (choice.evict_retained) {
             for (std::uint32_t retained_lane = 0;
                  retained_lane < max_concurrency_ &&
-                 !instance_.program->can_admit_lane(lane, *request->lane_plans[lane]);
+                 !instance_.program->can_admit_lane(
+                     lane, *request->lane_plans[lane],
+                     protection_ ? protection_->head_request_id : 0ULL);
                  ++retained_lane) {
                 if (retained_lane != lane && slots_[retained_lane] == nullptr &&
                     instance_.program->has_retained_lane(retained_lane)) {
@@ -1844,7 +1848,9 @@ private:
                     invalidate_lane_plans(retained_lane);
                 }
             }
-            if (!instance_.program->can_admit_lane(lane, *request->lane_plans[lane])) {
+            if (!instance_.program->can_admit_lane(
+                    lane, *request->lane_plans[lane],
+                    protection_ ? protection_->head_request_id : 0ULL)) {
                 throw std::logic_error("retained eviction did not make admission feasible");
             }
         }

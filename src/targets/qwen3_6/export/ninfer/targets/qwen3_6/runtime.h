@@ -192,10 +192,12 @@ public:
                                                              const PreparedPrompt& prompt,
                                                              const RequestBasePlan<Variant>& base);
     [[nodiscard]] bool can_admit_lane(std::uint32_t lane,
-                                      const RequestPlan<Variant>& plan) const noexcept;
+                                      const RequestPlan<Variant>& plan,
+                                      std::uint64_t head_request_id = 0) const noexcept;
     [[nodiscard]] bool
     can_admit_lane_after_retained_eviction(std::uint32_t lane,
-                                           const RequestPlan<Variant>& plan) const noexcept;
+                                           const RequestPlan<Variant>& plan,
+                                           std::uint64_t head_request_id = 0) const noexcept;
     [[nodiscard]] runtime::AdmissionResources admission_capacity() const noexcept;
     [[nodiscard]] runtime::PrefillStepResult start_prefill_lane(std::uint32_t lane,
                                                                 PreparedPrompt&& prompt,
