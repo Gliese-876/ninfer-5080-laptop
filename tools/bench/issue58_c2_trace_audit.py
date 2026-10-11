@@ -23,12 +23,14 @@ VALID_LANES = {"occupied", "plan_unavailable", "direct_admittable", "retained_ev
 VALID_REASONS = {"short_lane_policy_hold", "no_vacant_lane", "vacant_lane_not_admittable"}
 VALID_CAUSES = {"invalid_old_entitlement", "invalid_reclaimable_entitlement", "exceeds_logical_capacity", "insufficient_physical_pages"}
 
-def audit(paths):
+def audit(paths, require_evidence=False):
     counts = Counter()
     errors = []
     observed = []
     queue_values = []
+    gate = []
     for path in paths:
+        records = 0
         with path.open(encoding="utf-8", errors="replace") as stream:
             for index, raw in enumerate(stream, 1):
                 line = raw.rstrip("\r\n")
@@ -47,6 +49,7 @@ def audit(paths):
                         queue_values.append(ms)
                         observed.append({"source": str(path), "line": index, "kind": "selected_admission",
                                          "request_id": rid, "lane": lane, "queue_wait_ms": ms})
+                        records += 1
                     elif name == "lane":
                         if fields[2] not in VALID_LANES:
                             errors.append(f"{path}:{index}: invalid lane result")
@@ -60,6 +63,7 @@ def audit(paths):
                             errors.append(f"{path}:{index}: invalid KV denial cause")
                         counts["kv_" + fields[3]] += 1
                     counts[name] += 1
+                    records += 1
                     break
                 if not found:
                     match = QUEUE.fullmatch(line)
@@ -68,8 +72,11 @@ def audit(paths):
                             errors.append(f"{path}:{index}: invalid summary reason")
                         counts["summary_" + match.group(4)] += 1
                         counts["summary"] += 1
+                        records += 1
                     else:
                         errors.append(f"{path}:{index}: unrecognised admission trace format")
+        if require_evidence and records == 0:
+            gate.append(str(path))
     queue_values.sort()
     def percentile(p):
         if not queue_values:
@@ -88,21 +95,27 @@ def audit(paths):
         },
         "selected_admissions": observed,
         "unrecognised_or_invalid_lines": errors,
+        "no_admission_evidence_files": gate,
         "limitations": [
             "Request id in selected_admission logs is scheduler-local; never join across sessions/restarts without a verified common namespace.",
             "KV denial logs have lane but NO request id; per-lane and admission traces are sampled; no causal join is claimed.",
             "Selected admission durations exclude rejected, cancelled, expired and never-admitted requests (survivor bias).",
             "No GPU-start time, first-token time, GPU schedule ownership or end-to-end TTFT is measured here.",
             "The report cannot establish starvation root cause or authorize C2 rollout.",
+            "Admission traces are emitted only while a FIFO head is blocked (10s throttle); zero records also occur for healthy short runs and for dead/crashed processes; the no-evidence gate never diagnoses the process, it only demands re-examination.",
         ],
     }
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stderr", type=Path, nargs="+", help="Previously saved raw stderr files; never a live service")
+    parser.add_argument("--require-evidence", action="store_true",
+        help="fail closed (rc 7) when an input file contains no recognized admission records")
     args = parser.parse_args(argv)
-    report = audit(args.stderr)
+    report = audit(args.stderr, require_evidence=args.require_evidence)
     print(json.dumps(report, indent=2, sort_keys=True))
+    if args.require_evidence and report["no_admission_evidence_files"]:
+        return 7
     return int(bool(report["unrecognised_or_invalid_lines"]))
 
 if __name__ == "__main__":
