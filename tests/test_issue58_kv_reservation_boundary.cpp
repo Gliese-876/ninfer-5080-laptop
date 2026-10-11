@@ -20,7 +20,7 @@ int main() {
     // Issue #58 counterexample (100/80/10/30): a lane's retained old entitlement
     // equals the pool entitlement (100), reclaimable accounting claims 80 more,
     // the candidate requests 10, logical capacity 300, the allocator holds 30
-    // physical pages. committed = 100 - 100 - 80 wraps (uint32 underflow);
+    // physical pages. the reclaimable-entitlement guard rejects 80 > 100 - 100 before any unsigned subtraction;
     // the first failing guard is InvalidReclaimableEntitlement (80 > 100 - 100):
     // a fitting 10-page request is denied by reservation-vs-allocator
     // accounting, the demonstrated denial class.
@@ -30,9 +30,8 @@ int main() {
         "100/80/10/30 counterexample did not reproduce the demonstrated denial");
 
     // Allocator discriminant: identical reservation accounting (old 10,
-    // entitled 100, reclaimable 20 -> committed 69) against different allocator
-    // bounds: a 69-page allocator denies the 10-page request (committed leaves
-    // 0); a 300-page allocator accepts it. Same reservation, different
+    // entitled 100, reclaimable 20 -> committed 70) against different allocator
+    // bounds: a 69-page allocator denies the 10-page request (committed 70 exceeds physical 69); a 300-page allocator accepts it. Same reservation, different
     // allocator bound -> denied, then accepted: the reservation-vs-allocator
     // identity the telemetry must be able to separate.
     failures += check(
