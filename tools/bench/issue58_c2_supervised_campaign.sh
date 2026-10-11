@@ -74,7 +74,7 @@ finish() {
             fi
         fi
         if [[ -f "$SERVERLOG" ]]; then
-            python3 tools/bench/issue58_c2_trace_audit.py "$SERVERLOG" > "$ROOT/trace_audit.json"
+            python3 tools/bench/issue58_c2_trace_audit.py "$SERVERLOG" --require-evidence > "$ROOT/trace_audit.json"
             echo "TRACE_AUDIT_RC=$?"
         fi
         echo "CAPTURE_DIR=$ROOT"
