@@ -46,7 +46,7 @@ host test `tests/test_issue58_kv_reservation_boundary.cpp`
   reclaimable-entitlement guard fires first; a fitting 10-page request is
   denied by reservation-vs-allocator accounting.
 - **Allocator discriminant** — identical reservation (old 10, entitled 100,
-  reclaimable 20 → committed 69) against a 69-page allocator is denied
+  reclaimable 20 → committed 70) against a 69-page allocator is denied
   (`insufficient_physical_pages`); the same reservation against a 300-page
   allocator is accepted (`none`). Same reservation, different allocator bound:
   the telemetry must be able to separate the two denial identities.
