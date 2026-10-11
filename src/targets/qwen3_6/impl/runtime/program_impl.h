@@ -34,18 +34,30 @@ void issue58_log_kv_denial(std::uint32_t lane, const char* path, const char* poo
                            runtime::Issue58KvDenial reason, std::uint32_t old_pages,
                            std::uint32_t reclaimable, std::uint32_t new_pages,
                            std::uint32_t entitled, std::uint32_t logical,
-                           std::uint32_t physical) noexcept {
+                           std::uint32_t physical, std::uint64_t head_request_id = 0) noexcept {
     const char* enabled = std::getenv("NINFER_ADMISSION_TRACE");
     if (!enabled || enabled[0] != '1' || enabled[1] != '\0') { return; }
     thread_local Clock::time_point last{};
     const auto now = Clock::now();
     if (last != Clock::time_point{} && now - last < std::chrono::seconds(10)) { return; }
     last = now;
-    std::fprintf(stderr,
-        "[ADMISSION-KV-DENIAL] lane=%u path=%s pool=%s cause=%s old=%u "
-        "reclaimable=%u requested=%u entitled=%u logical=%u physical=%u\n",
-        lane, path, pool_name, runtime::issue58_kv_denial_name(reason),
-        old_pages, reclaimable, new_pages, entitled, logical, physical);
+    // Telemetry-only optional head request id (Issue #58). head_request_id == 0 means the
+    // caller did not supply a shared request id, so the field is omitted entirely: legacy
+    // lane-only captures keep the exact historical format and never claim a causal join.
+    if (head_request_id != 0) {
+        std::fprintf(stderr,
+            "[ADMISSION-KV-DENIAL] head=%llu lane=%u path=%s pool=%s cause=%s old=%u "
+            "reclaimable=%u requested=%u entitled=%u logical=%u physical=%u\n",
+            static_cast<unsigned long long>(head_request_id), lane, path, pool_name,
+            runtime::issue58_kv_denial_name(reason), old_pages, reclaimable, new_pages,
+            entitled, logical, physical);
+    } else {
+        std::fprintf(stderr,
+            "[ADMISSION-KV-DENIAL] lane=%u path=%s pool=%s cause=%s old=%u "
+            "reclaimable=%u requested=%u entitled=%u logical=%u physical=%u\n",
+            lane, path, pool_name, runtime::issue58_kv_denial_name(reason),
+            old_pages, reclaimable, new_pages, entitled, logical, physical);
+    }
 }
 
 std::int32_t checked_i32(std::uint32_t value, const char* label) {
@@ -462,7 +474,8 @@ ProgramImplCore::~ProgramImplCore() noexcept {
     }
 }
 
-bool ProgramImplCore::can_admit_lane(std::uint32_t lane, const RequestPlan& plan) const noexcept {
+bool ProgramImplCore::can_admit_lane(std::uint32_t lane, const RequestPlan& plan,
+                                     std::uint64_t head_request_id) const noexcept {
     if (lane >= max_concurrency || plan.impl_ == nullptr) { return false; }
     const RequestControl& request = requests[lane];
     if (request.lifecycle == Lifecycle::Prefilling || request.lifecycle == Lifecycle::Active ||
@@ -470,8 +483,9 @@ bool ProgramImplCore::can_admit_lane(std::uint32_t lane, const RequestPlan& plan
         return false;
     }
     const SequenceState& sequence = sequences[lane];
-    const auto can_replace = [lane](const PagedKVPool& pool, std::uint32_t old_pages,
-                                    std::uint32_t new_pages, const char* pool_name) {
+    const auto can_replace =
+        [lane, head_request_id](const PagedKVPool& pool, std::uint32_t old_pages,
+                                std::uint32_t new_pages, const char* pool_name) {
         const bool accepted =
             old_pages <= pool.entitled_pages() && new_pages <= pool.logical_page_capacity() &&
             new_pages <= pool.page_group_count() - (pool.entitled_pages() - old_pages);
@@ -481,7 +495,7 @@ bool ProgramImplCore::can_admit_lane(std::uint32_t lane, const RequestPlan& plan
                 runtime::issue58_kv_denial(old_pages, 0, new_pages, pool.entitled_pages(),
                                            pool.logical_page_capacity(), pool.page_group_count()),
                 old_pages, 0, new_pages, pool.entitled_pages(),
-                pool.logical_page_capacity(), pool.page_group_count());
+                pool.logical_page_capacity(), pool.page_group_count(), head_request_id);
         }
         return accepted;
     };
@@ -497,7 +511,8 @@ bool ProgramImplCore::can_admit_lane(std::uint32_t lane, const RequestPlan& plan
 }
 
 bool ProgramImplCore::can_admit_lane_after_retained_eviction(
-    std::uint32_t lane, const RequestPlan& plan) const noexcept {
+    std::uint32_t lane, const RequestPlan& plan,
+    std::uint64_t head_request_id) const noexcept {
     if (lane >= max_concurrency || plan.impl_ == nullptr) { return false; }
     const RequestControl& request = requests[lane];
     if (request.lifecycle == Lifecycle::Prefilling || request.lifecycle == Lifecycle::Active ||
@@ -515,9 +530,10 @@ bool ProgramImplCore::can_admit_lane_after_retained_eviction(
         }
     }
 
-    const auto can_replace = [lane](const PagedKVPool& pool, std::uint32_t old_pages,
-                                    std::uint32_t reclaimable_pages, std::uint32_t new_pages,
-                                    const char* pool_name) {
+    const auto can_replace =
+        [lane, head_request_id](const PagedKVPool& pool, std::uint32_t old_pages,
+                                std::uint32_t reclaimable_pages, std::uint32_t new_pages,
+                                const char* pool_name) {
         // Avoid additional diagnostic arithmetic on the default (trace-disabled) hot path.
         const char* trace = std::getenv("NINFER_ADMISSION_TRACE");
         if (trace && trace[0] == '1' && trace[1] == '\0') {
@@ -527,7 +543,8 @@ bool ProgramImplCore::can_admit_lane_after_retained_eviction(
             if (reason != runtime::Issue58KvDenial::None) {
                 issue58_log_kv_denial(lane, "after_retained_eviction", pool_name, reason, old_pages,
                                       reclaimable_pages, new_pages, pool.entitled_pages(),
-                                      pool.logical_page_capacity(), pool.page_group_count());
+                                      pool.logical_page_capacity(), pool.page_group_count(),
+                                      head_request_id);
             }
         }
         // Preserve the exact original scheduler predicate independently of diagnostics.

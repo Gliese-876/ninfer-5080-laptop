@@ -137,14 +137,16 @@ RequestPlan<Variant> Program<Variant>::plan_request_for_lane(std::uint32_t lane,
 
 template <>
 bool Program<Variant>::can_admit_lane(std::uint32_t lane,
-                                      const RequestPlan<Variant>& plan) const noexcept {
-    return impl_->can_admit_lane(lane, plan);
+                                      const RequestPlan<Variant>& plan,
+                                      std::uint64_t head_request_id) const noexcept {
+    return impl_->can_admit_lane(lane, plan, head_request_id);
 }
 
 template <>
 bool Program<Variant>::can_admit_lane_after_retained_eviction(
-    std::uint32_t lane, const RequestPlan<Variant>& plan) const noexcept {
-    return impl_->can_admit_lane_after_retained_eviction(lane, plan);
+    std::uint32_t lane, const RequestPlan<Variant>& plan,
+    std::uint64_t head_request_id) const noexcept {
+    return impl_->can_admit_lane_after_retained_eviction(lane, plan, head_request_id);
 }
 
 template <>
