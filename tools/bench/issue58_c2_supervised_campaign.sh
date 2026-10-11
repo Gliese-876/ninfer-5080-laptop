@@ -13,7 +13,17 @@ STAGED="$ISSUE58_STAGED_BIN"
 [[ "$(sha256sum "$STAGED" | cut -d' ' -f1)" == "$ISSUE58_STAGED_SHA256" ]] || { echo "BLOCKED: SHA mismatch"; exit 44; }
 PROD=/models/ninfer-builds/build-production-current-main-d5ee1bf/apps/ninfer-serve
 [[ "$(readlink -f "$STAGED")" != "$(readlink -f "$PROD")" ]] || { echo "BLOCKED: production binary"; exit 45; }
-exec 9>/tmp/issue58-c2-supervision.lock
+# Avoid predictable shared /tmp lock: prior runs may have created this path as root.
+# The user's systemd runtime directory is private to UID 1000 and survives SSH shells.
+LOCK_HOME="/run/user/$(id -u)"
+[[ -d "$LOCK_HOME" && ! -L "$LOCK_HOME" && "$(stat -c %u "$LOCK_HOME")" == "$(id -u)" && "$(stat -c %a "$LOCK_HOME")" == 700 ]] || { echo "BLOCKED: private runtime lock directory unavailable"; exit 46; }
+LOCK_FILE="$LOCK_HOME/issue58-c2-supervision.lock"
+[[ ! -L "$LOCK_FILE" ]] || { echo "BLOCKED: lock symlink"; exit 46; }
+if [[ -e "$LOCK_FILE" ]]; then
+    [[ -f "$LOCK_FILE" && "$(stat -c %u "$LOCK_FILE")" == "$(id -u)" ]] || { echo "BLOCKED: unsafe existing lock"; exit 46; }
+fi
+(umask 077; : >>"$LOCK_FILE") || { echo "BLOCKED: cannot open private lock"; exit 46; }
+exec 9>"$LOCK_FILE" || { echo "BLOCKED: cannot lock private file"; exit 46; }
 flock -n 9 || { echo "BLOCKED: overlapping campaign"; exit 46; }
 [[ "$(systemctl --user show ninfer-local-model.service -p ActiveState --value)" == active ]] || { echo "BLOCKED: inactive C1"; exit 47; }
 curl -fsS --max-time 5 http://127.0.0.1:8080/health >/dev/null || { echo "BLOCKED: C1 unhealthy"; exit 48; }
