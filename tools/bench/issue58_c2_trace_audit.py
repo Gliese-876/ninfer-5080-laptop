@@ -117,12 +117,13 @@ def audit(paths, require_evidence=False):
              "request_id": a["request_id"],
              "admission_line": a["source"] + ":" + str(a["line"]),
              "lane": d["lane"],
-             "note": "shared request id + lane; sampling/throttling applies, no causal proof",
+             "note": "same file, denial before admission, shared request id + lane; no causal proof",
             }
             for d in kv_denials
-            if d["lane_id_joinable"]
+            if d["lane_id_joinable"] and d["request_id"] != 0
             for a in observed
-            if a["request_id"] == d["request_id"]
+            if a["source"] == d["source"] and d["line"] < a["line"]
+            and a["request_id"] == d["request_id"]
             and (d["lane"] == a["lane"] or a["lane"] is None)
         ],
         "unrecognised_or_invalid_lines": errors,
@@ -130,7 +131,7 @@ def audit(paths, require_evidence=False):
         "limitations": [
             "Request id in selected_admission logs is scheduler-local; never join across sessions/restarts without a verified common namespace.",
             "KV denial logs have lane but NO request id; per-lane and admission traces are sampled; no causal join is claimed for lane-only denials.",
-            "A kv_denial_joins entry joins a head-id-bearing KV denial line to a selected-admission line that share the SAME request id and lane; this is a shared-id association, not causal proof (sampling/throttling applies).",
+            "A kv_denial_joins entry is a same-file, denial-before-admission shared-id-and-lane association; request ids may repeat across files, and sampling/throttling prevents causal proof.",
             "A head id never proves the denial's true originating request; denials are logged from the probing request's perspective at the admission lane.",
             "Selected admission durations exclude rejected, cancelled, expired and never-admitted requests (survivor bias).",
             "No GPU-start time, first-token time, GPU schedule ownership or end-to-end TTFT is measured here.",
