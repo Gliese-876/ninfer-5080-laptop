@@ -53,19 +53,12 @@ host test `tests/test_issue58_kv_reservation_boundary.cpp`
 - **Pool boundaries** — reclaimable > entitled-old →
   `invalid_reclaimable_entitlement`; old > entitled →
   `invalid_old_entitlement`; requested > logical →
-  `exceeds_logical_capacity`; exact fit (committed == physical, new 0) fits;
+  `exceeds_logical_capacity`; valid reclaimable/old entitlement inputs with zero new pages fit;
   one page past exact fit fires `insufficient_physical_pages`.
 - **Allocator boundaries** — exact fit `entitled == physical` accepts; one
   page past the allocator bound is denied (`insufficient_physical_pages`).
 
-Caveat recorded as evidence, not fixed (out of scope): the
-`entitled - old - reclaimable` committed computation is `std::uint32_t`, so an
-over-claiming reservation silently wraps instead of clamping, and the
-first-failed guard then names `insufficient_physical_pages` (on the wrapped
-value) instead of the true reclaimable-entitlement defect. The telemetry
-identity fix in §1 is what lets future captures attribute such denials to the
-probing request; changing the predicate or clamping behavior is
-**not** authorized by this task.
+**Classifier scope:** Invalid reclaimable claims are rejected before unsigned subtraction; the test exercises guard ordering, not wraparound. These synthetic inputs do not show that this denial class occurred in the 75-job production-like workload, and do not prove the starvation cause.
 
 ## 3. What this does NOT prove
 
