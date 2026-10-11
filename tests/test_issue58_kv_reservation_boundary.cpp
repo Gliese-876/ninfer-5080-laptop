@@ -49,17 +49,17 @@ int main() {
             Issue58KvDenial::InvalidReclaimableEntitlement,
         "pool entitlement boundary did not flag reclaimable exceeding entitled-old");
 
-    // Exact-fit pool boundary: committed (entitled - old - reclaimable) ==
-    // physical (no slack), requested 0 fits.
+    // Valid entitlement boundary: old 9 <= entitled 10, committed 1 <= physical 10,
+    // and new 0 fits. This is not an exact allocator fit.
     failures += check(
         issue58_kv_denial(9u, 0u, 0u, 10u, 300u, 10u) == Issue58KvDenial::None,
-        "exact-fit pool boundary (committed==physical, new=0) denied a fitting plan");
-    // One page past the pool exact-fit boundary: old 11 > entitled 10 fires the
+        "valid old entitlement with new=0 denied a fitting plan");
+    // Invalid old-entitlement boundary: old 11 > entitled 10 fires the
     // InvalidOldEntitlement guard (first in chain).
     failures += check(
         issue58_kv_denial(11u, 0u, 1u, 10u, 300u, 10u) ==
             Issue58KvDenial::InvalidOldEntitlement,
-        "one page past the pool exact-fit boundary was not denied");
+        "invalid old entitlement was not denied");
 
     // Exact-fit allocator (reservation-vs-allocator) boundary: entitled 10
     // (== physical 10), old 0 -> committed 10 == physical; requested 0 fits
