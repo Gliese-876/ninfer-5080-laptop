@@ -37,6 +37,7 @@ STOP_ATTEMPTED=0
 RESTORED=0
 finish() {
     local rc=$?
+    local audit_rc=0
     trap - EXIT INT TERM HUP
     set +e
     {
@@ -75,7 +76,12 @@ finish() {
         fi
         if [[ -f "$SERVERLOG" ]]; then
             python3 tools/bench/issue58_c2_trace_audit.py "$SERVERLOG" --require-evidence > "$ROOT/trace_audit.json"
-            echo "TRACE_AUDIT_RC=$?"
+            audit_rc=$?
+            echo "TRACE_AUDIT_RC=$audit_rc"
+            if (( audit_rc != 0 && rc == 0 )); then
+                rc=57
+                echo "CAMPAIGN_AUDIT_FAILED=YES"
+            fi
         fi
         echo "CAPTURE_DIR=$ROOT"
     } >>"$REPORT" 2>&1
@@ -86,6 +92,7 @@ lines=pathlib.Path(sys.argv[1]).read_text(errors="replace").splitlines()
 print("OSC52_CLIPBOARD=ISSUE58_CAMPAIGN")
 print("\033]52;c;"+base64.b64encode("\n".join(lines[-75:]).encode()).decode()+"\a",end="")
 PY
+    exit "$rc"
 }
 trap finish EXIT
 trap 'exit 130' INT
