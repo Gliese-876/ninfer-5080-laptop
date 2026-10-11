@@ -101,7 +101,11 @@ trap 'exit 129' HUP
      "$(pwd)/tools/bench/issue58_c2_watchdog.py" "$ROOT" "$WRAPPER" "$STAGED"
  sleep 2
  [[ -f "$ROOT/watchdog_ready" ]] || { echo "BLOCKED: root watchdog not armed"; exit 51; }
- sudo -n kill -0 "$(cat "$ROOT/watchdog.pid")" || { echo "BLOCKED: watchdog missing"; exit 52; }
+ # watchdog.pid is created by root with private permissions; read through the
+# already-approved sudo boundary rather than changing its file mode.
+WATCHDOG_PID="$(sudo -n cat "$ROOT/watchdog.pid" 2>/dev/null)" || { echo "BLOCKED: cannot read root watchdog pid"; exit 52; }
+[[ "$WATCHDOG_PID" =~ ^[0-9]+$ && "$WATCHDOG_PID" -gt 1 ]] || { echo "BLOCKED: invalid watchdog pid"; exit 52; }
+sudo -n kill -0 "$WATCHDOG_PID" || { echo "BLOCKED: watchdog missing"; exit 52; }
  echo "ROOT_WATCHDOG=ARMED"
  STOP_ATTEMPTED=1
  sudo -n "$WRAPPER" stop
