@@ -79,8 +79,8 @@ class TestIssue58C2TraceAudit(unittest.TestCase):
         self.assertFalse(r["unrecognised_or_invalid_lines"])
 
     def test_no_join_across_files_with_reused_id(self):
-        denial = "[ADMISSION-KV-DENIAL] head=7 lane=1 path=direct pool=main cause=insufficient_physical_pages old=2 reclaimable=0 requested=12 entitled=10 logical=100 physical=18\\n"
-        admission = "[ADMISSION-QUEUE-TIMING] id=7 lane=1 queue_wait_ms=100 event=selected_for_admission\\n"
+        denial = "[ADMISSION-KV-DENIAL] head=7 lane=1 path=direct pool=main cause=insufficient_physical_pages old=2 reclaimable=0 requested=12 entitled=10 logical=100 physical=18\n"
+        admission = "[ADMISSION-QUEUE-TIMING] id=7 lane=1 queue_wait_ms=100 event=selected_for_admission\n"
         with tempfile.TemporaryDirectory() as td:
             first, second = Path(td) / "run1.log", Path(td) / "run2.log"
             first.write_text(denial, encoding="utf-8")
@@ -90,13 +90,13 @@ class TestIssue58C2TraceAudit(unittest.TestCase):
     def test_no_join_when_denial_occurs_after_admission(self):
         admission = "[ADMISSION-QUEUE-TIMING] id=7 lane=1 queue_wait_ms=100 event=selected_for_admission"
         denial = "[ADMISSION-KV-DENIAL] head=7 lane=1 path=direct pool=main cause=insufficient_physical_pages old=2 reclaimable=0 requested=12 entitled=10 logical=100 physical=18"
-        r = self.capture(admission + "\\n" + denial + "\\n")
+        r = self.capture(admission + "\n" + denial + "\n")
         self.assertEqual(r["kv_denial_joins"], [])
 
     def test_zero_head_is_not_joinable(self):
         denial = "[ADMISSION-KV-DENIAL] head=0 lane=1 path=direct pool=main cause=insufficient_physical_pages old=2 reclaimable=0 requested=12 entitled=10 logical=100 physical=18"
         admission = "[ADMISSION-QUEUE-TIMING] id=0 lane=1 queue_wait_ms=100 event=selected_for_admission"
-        self.assertEqual(self.capture(denial + "\\n" + admission + "\\n")["kv_denial_joins"], [])
+        self.assertEqual(self.capture(denial + "\n" + admission + "\n")["kv_denial_joins"], [])
 
     def test_truncated_summary_rejected(self):
         r = self.capture(
