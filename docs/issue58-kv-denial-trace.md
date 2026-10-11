@@ -31,3 +31,7 @@ Review predicate equivalence line-by-line including short-circuit order and unsi
 
 ## Limitations
 The emitted numerical reason may be sampled and may not represent the same head request as a contemporaneous 10-second lane trace, especially under concurrent workers. The initial trace reports the first observed rejection in a predicate chain, not every possible constraint. The optional head request id is scheduler-local per process/session; never join across sessions or restarts without a verified common namespace. A controlled candidate C2 reproduction and admission timestamps remain necessary before proposing changes to scheduler behavior. The 18.176s TTFT remains unresolved; this telemetry does not claim to resolve it.
+
+## Offline join identity safeguards (independent web review)
+
+A KV-denial/admission association requires **the same source capture file**, identical non-zero request ID and lane, and a denial log line preceding the selected-admission line. IDs can be reused after process restart, so never join across files or independent processes; even within one file a combined multi-process capture may need further provenance inspection. Records lacking an ID remain unjoined. These safeguards prevent several false matches but do **not** establish causal proof or explain TTFT. Tests explicitly cover reused IDs across files, reverse chronology and head=0.
