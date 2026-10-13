@@ -3,6 +3,19 @@
 // The two benchmark entries map directly to the public append-and-attend and cached-only
 // contracts. Decode, small-T, prompt, split-KV, and kernel selection remain private production
 // implementation details and never enter this benchmark's dispatch or output schema.
+//
+// Issue #47 isolated split experiment: --experimental-splits 84|85 selects the 27B base
+// split count. 85 (default) is the unchanged public-Op production path. In 84 mode, 27B
+// T=1..6 cases route through the benchmark-only 84-split launchers in
+// src/ops/launcher/gqa_attention_decode.cu (not exposed in the public header, forward-
+// declared below); 27B B>1 cases (and 16-head cases) keep the 85 production route, and
+// 27B B=1 T>6 cases are skipped (no 84 chunked/prompt entry exists). The timed region, cache, positions, masking, and
+// valid-column semantics are identical across 84 and 85; each row reports the base split
+// count it actually ran. Workspace reporting: 84-eligible rows report the 84 alignment-aware
+// capacity (what the 84 route consumes from an arena, including the 256-byte alignment gap
+// before the third partial allocation); every row's workspace arena itself is sized at the
+// 85 production capacity, so 84 and 85 rows remain directly comparable. Production
+// 85-split routing is untouched.
 
 #include "ninfer/ops/gqa_attention.h"
 
@@ -12,6 +25,28 @@
 
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
+
+namespace ninfer::ops::detail {
+
+void gqa_attention_cached_small_t_launch_s84(const Tensor& q, const Tensor& pos, float scale,
+                                             const PagedKVLayerView& cache,
+                                             GqaExecutionEnvelope envelope,
+                                             WorkspaceArena& workspace, Tensor& out,
+                                             cudaStream_t stream);
+
+void gqa_attention_small_t_launch_s84(const Tensor& q, const Tensor& k, const Tensor& v,
+                                      const Tensor& pos, const Tensor& valid_columns,
+                                      const Tensor& table_rows, float scale,
+                                      PagedKVBatchLayerView cache, GqaExecutionEnvelope envelope,
+                                      std::int32_t column_begin, std::int32_t width,
+                                      WorkspaceArena& workspace, Tensor& out,
+                                      cudaStream_t stream);
+
+std::size_t gqa_attention_s84_workspace_capacity_bytes(std::int32_t q_heads, DType cache_dtype,
+                                                       std::int32_t tokens, std::int32_t batch,
+                                                       std::int32_t visible);
+
+} // namespace ninfer::ops::detail
 
 #include <algorithm>
 #include <cerrno>
@@ -71,6 +106,8 @@ struct Options {
     int repeat   = 30;
     bool profile = false;
     std::string csv_out;
+    // Issue #47: 27B base split count for the A/B experiment; 85 = production path.
+    std::int32_t experimental_splits = 85;
 };
 
 struct Result {
@@ -86,6 +123,7 @@ struct Result {
     std::string valid_columns;
     std::string table_rows;
     std::size_t workspace_bytes;
+    std::int32_t splits;
     double logical_bytes;
     double useful_flops;
     bench::ColdTiming timing;
@@ -101,7 +139,7 @@ struct Result {
                  "[--context L,...] [--row-contexts L0,...] [--valid-columns V0,...] "
                  "[--table-rows R0,...] "
                  "[--execution eager|graph|both] [--cache cold|warm|both] "
-                 "[--mapping identity|fragmented] "
+                 "[--mapping identity|fragmented] [--experimental-splits 84|85] "
                  "[--warmup N] [--repeat N] [--profile] [--csv-out PATH]\n",
                  message);
     std::exit(2);
@@ -220,6 +258,14 @@ Options parse_options(int argc, char** argv) {
                 options.mapping = PageMapping::Fragmented;
             else
                 usage("--mapping expects identity or fragmented");
+        } else if (argument == "--experimental-splits") {
+            const std::string_view value(next("--experimental-splits requires a value"));
+            if (value == "84")
+                options.experimental_splits = 84;
+            else if (value == "85")
+                options.experimental_splits = 85;
+            else
+                usage("--experimental-splits expects 84 or 85");
         } else if (argument == "--warmup") {
             options.warmup = parse_i32(next("--warmup requires a value"), 0, 10000, "--warmup");
         } else if (argument == "--repeat") {
@@ -386,10 +432,13 @@ std::int32_t profile_visible(std::span<const std::int32_t> contexts,
 
 class Case {
 public:
-    Case(Geometry geometry, DType dtype, std::int32_t tokens,
+    Case(Geometry geometry, DType dtype, std::int32_t tokens, std::int32_t splits,
          std::span<const std::int32_t> contexts, std::span<const std::int32_t> valid_columns,
          std::span<const std::int32_t> table_rows, PageMapping mapping)
         : batch_(static_cast<std::int32_t>(contexts.size())),
+          splits_(splits),
+          is_27b_(geometry.query_heads == 24 && geometry.kv_heads == 4),
+          s84_eligible_(splits == 84 && is_27b_ && batch_ == 1 && tokens >= 1 && tokens <= 6),
           masked_(std::any_of(valid_columns.begin(), valid_columns.end(),
                               [tokens](std::int32_t valid) { return valid != tokens; })),
           visible_(profile_visible(contexts, valid_columns)), padded_(align_context(visible_)),
@@ -418,6 +467,13 @@ public:
                                     tokens * batch_ * 2)),
           workspace_bytes_(workspace_capacity(geometry, dtype, tokens, batch_, visible_)),
           workspace_(std::max<std::size_t>(workspace_bytes_, 1)),
+          // 84-eligible rows report the 84 alignment-aware capacity (what the 84 route
+          // consumes) instead of the 85 production capacity; the arena on every row is
+          // sized at the 85 production capacity, so 84 and 85 rows stay comparable.
+          reported_workspace_(s84_eligible_ ? ninfer::ops::detail::gqa_attention_s84_workspace_capacity_bytes(
+                                                 geometry.query_heads, dtype, tokens, batch_,
+                                                 visible_)
+                                            : workspace_bytes_),
           q_tensor_(q_.p, DType::BF16, {kHeadDim, geometry.query_heads, tokens, batch_}),
           k_tensor_(k_.p, DType::BF16, {kHeadDim, geometry.kv_heads, tokens, batch_}),
           v_tensor_(v_.p, DType::BF16, {kHeadDim, geometry.kv_heads, tokens, batch_}),
@@ -462,7 +518,27 @@ public:
                               cudaMemcpyHostToDevice));
     }
 
+    // 84 mode: 27B B=1 T=1..6 cases run the benchmark-only 84-split launchers; B>1 and
+    // 16-head cases keep the public-Op production (85-split) route, so 84 and 85 rows differ
+    // only in the partial-KV split count.
     void launch(Entry entry, cudaStream_t stream) {
+        if (s84_eligible_) {
+            if (entry == Entry::Append) {
+                ninfer::ops::detail::gqa_attention_small_t_launch_s84(q_tensor_, k_tensor_, v_tensor_,
+                                                         positions_tensor_,
+                                                         masked_ ? valid_columns_tensor_ : Tensor{},
+                                                         table_rows_tensor_, kScale,
+                                                         batch_cache_view_, envelope_, 0,
+                                                         q_tensor_.ne[2], workspace_,
+                                                         output_tensor_, stream);
+            } else {
+                ninfer::ops::detail::gqa_attention_cached_small_t_launch_s84(q_tensor_, positions_tensor_,
+                                                                kScale, cache_view_, envelope_,
+                                                                workspace_, output_tensor_,
+                                                                stream);
+            }
+            return;
+        }
         if (entry == Entry::Append) {
             const Tensor validity = masked_ ? valid_columns_tensor_ : Tensor{};
             ops::gqa_attention(q_tensor_, k_tensor_, v_tensor_, positions_tensor_, validity,
@@ -476,8 +552,27 @@ public:
 
     [[nodiscard]] std::size_t workspace_bytes() const noexcept { return workspace_bytes_; }
 
+    // Route capacity: 84-eligible rows report the 84 alignment-aware capacity; every other
+    // row reports the 85 production capacity. The workspace arena itself is always sized
+    // at the 85 production capacity, so 84 and 85 rows remain directly comparable.
+    [[nodiscard]] std::size_t reported_workspace_bytes() const noexcept
+    {
+        return reported_workspace_;
+    }
+
+    [[nodiscard]] std::int32_t route_splits() const noexcept
+    {
+        return s84_eligible_ ? 84 : 85;
+    }
+
+    // True when this case takes the 84-split route (used to skip ineligible 84 rows).
+    [[nodiscard]] bool s84_eligible() const noexcept { return s84_eligible_; }
+
 private:
     std::int32_t batch_;
+    std::int32_t splits_;
+    bool is_27b_;
+    bool s84_eligible_;
     bool masked_;
     std::int32_t visible_;
     std::int32_t padded_;
@@ -508,6 +603,7 @@ private:
     PagedKVLayerView cache_view_;
     PagedKVBatchLayerView batch_cache_view_;
     ops::GqaExecutionEnvelope envelope_;
+    std::size_t reported_workspace_;
 };
 
 const char* entry_name(Entry entry) { return entry == Entry::Append ? "append" : "cached"; }
@@ -600,12 +696,13 @@ void report(const Result& result) {
     const double gbps    = result.logical_bytes / seconds / 1.0e9;
     const double tflops  = result.useful_flops / seconds / 1.0e12;
     std::printf("entry=%-6s geometry=%-14s kv=%-4s mapping=%-10s execution=%-5s cache=%-4s "
-                "B=%d W=%d contexts=%s valid=%s rows=%s "
+                "B=%d W=%d splits=%d contexts=%s valid=%s rows=%s "
                 "workspace=%9zu median=%10.3f us min=%10.3f us p95=%10.3f us "
                 "logical=%8.1f GB/s (%5.1f%% of %.0f) math=%7.2f TFLOP/s (%5.1f%% of %.1f)\n",
                 entry_name(result.entry), result.geometry.name, dtype_name(result.kv_dtype),
                 mapping_name(result.mapping), execution_name(result.execution),
-                cache_name(result.cache), result.batch, result.tokens, result.row_contexts.c_str(),
+                cache_name(result.cache), result.batch, result.tokens, result.splits,
+                result.row_contexts.c_str(),
                 result.valid_columns.c_str(), result.table_rows.c_str(), result.workspace_bytes,
                 result.timing.median_us, result.timing.min_us, result.timing.p95_us, gbps,
                 gbps / kRtx5090DramGBs * 100.0, kRtx5090DramGBs, tflops,
@@ -618,8 +715,8 @@ void write_csv(const Options& options, const std::vector<Result>& results) {
     if (!path.parent_path().empty()) { std::filesystem::create_directories(path.parent_path()); }
     std::ofstream output(path);
     if (!output) { throw std::runtime_error("failed to open CSV output"); }
-    output << "entry,geometry,kv_dtype,mapping,execution,cache,B,W,row_contexts,valid_columns,"
-              "table_rows,workspace_bytes,logical_bytes,"
+    output << "entry,geometry,kv_dtype,mapping,execution,cache,B,W,row_contexts,"
+              "valid_columns,table_rows,workspace_bytes,splits,logical_bytes,"
               "useful_flops,median_us,min_us,p95_us\n";
     for (const Result& result : results) {
         output << entry_name(result.entry) << ',' << result.geometry.name << ','
@@ -627,7 +724,8 @@ void write_csv(const Options& options, const std::vector<Result>& results) {
                << execution_name(result.execution) << ',' << cache_name(result.cache) << ','
                << result.batch << ',' << result.tokens << ',' << result.row_contexts << ','
                << result.valid_columns << ',' << result.table_rows << ',' << result.workspace_bytes
-               << ',' << result.logical_bytes << ',' << result.useful_flops << ','
+               << ',' << result.splits << ',' << result.logical_bytes << ','
+               << result.useful_flops << ','
                << result.timing.median_us << ',' << result.timing.min_us << ','
                << result.timing.p95_us << '\n';
     }
@@ -655,9 +753,10 @@ void profile(Case& data, Entry entry, const Geometry& geometry, DType dtype, con
         CUDA_CHECK(cudaStreamSynchronize(stream));
     }
     std::printf(
-        "PROFILE entry=%s geometry=%s kv=%s mapping=%s dispatch=public execution=%s cache=%s "
+        "PROFILE entry=%s geometry=%s kv=%s mapping=%s dispatch=%s execution=%s cache=%s "
         "B=%d W=%d contexts=%.*s valid=%.*s rows=%.*s\n",
         entry_name(entry), geometry.name, dtype_name(dtype), mapping_name(options.mapping),
+        data.s84_eligible() ? "experimental-84" : "public",
         execution_name(execution), cache_name(cache), batch, width,
         static_cast<int>(contexts.size()), contexts.data(), static_cast<int>(valid_columns.size()),
         valid_columns.data(), static_cast<int>(table_rows.size()), table_rows.data());
@@ -734,6 +833,11 @@ int main(int argc, char** argv) {
         DeviceBuffer flush(kFlushBytes);
         const std::vector<Geometry> geometries = selected_geometries(options.geometry);
         const std::vector<DType> dtypes        = selected_dtypes(options.kv);
+        if (options.experimental_splits == 84) {
+            std::printf(
+                "84-split experiment mode: 27B T=1..6 cases use the 84-split launcher; 27B T>6 "
+                "cases are skipped; 16-head cases keep the 85 production route.\n");
+        }
 
         if (options.profile) {
             const Entry entry        = options.entry;
@@ -744,8 +848,15 @@ int main(int argc, char** argv) {
             const std::int32_t context =
                 options.row_contexts.empty() ? options.contexts.front() : 0;
             const RowProfile rows = make_row_profile(options, batch, width, context);
-            Case data(geometry, dtype, width, rows.contexts, rows.valid_columns, rows.table_rows,
-                      options.mapping);
+            if (options.experimental_splits == 84 && batch == 1 && geometry.query_heads == 24 &&
+                geometry.kv_heads == 4 && width > 6) {
+                std::printf("SKIP: 84-split mode has no 27B W=%d route (T>6 chunked/prompt)\n",
+                            width);
+                CUDA_CHECK(cudaStreamDestroy(stream));
+                return 0;
+            }
+            Case data(geometry, dtype, width, options.experimental_splits, rows.contexts,
+                      rows.valid_columns, rows.table_rows, options.mapping);
             const std::string context_name = profile_name(rows.contexts);
             const std::string valid_name   = profile_name(rows.valid_columns);
             const std::string table_name   = profile_name(rows.table_rows);
@@ -763,10 +874,18 @@ int main(int argc, char** argv) {
                 for (const std::int32_t batch : options.batches) {
                     for (const std::int32_t context : context_profiles) {
                         for (const std::int32_t tokens : options.tokens) {
+                            if (options.experimental_splits == 84 && batch == 1 &&
+                                geometry.query_heads == 24 && geometry.kv_heads == 4 &&
+                                tokens > 6) {
+                                // 84 mode has no 27B T>6 route; 16-head geometries keep the
+                                // 85 production route below.
+                                continue;
+                            }
                             const RowProfile rows =
                                 make_row_profile(options, batch, tokens, context);
-                            Case data(geometry, dtype, tokens, rows.contexts, rows.valid_columns,
-                                      rows.table_rows, options.mapping);
+                            Case data(geometry, dtype, tokens, options.experimental_splits,
+                                      rows.contexts, rows.valid_columns, rows.table_rows,
+                                      options.mapping);
                             for (const Entry entry : {Entry::Append, Entry::Cached}) {
                                 if ((options.entry == Entry::Append && entry != Entry::Append) ||
                                     (options.entry == Entry::Cached && entry != Entry::Cached) ||
@@ -809,7 +928,8 @@ int main(int argc, char** argv) {
                                             profile_name(rows.contexts),
                                             profile_name(rows.valid_columns),
                                             profile_name(rows.table_rows),
-                                            data.workspace_bytes(),
+                                            data.reported_workspace_bytes(),
+                                            data.route_splits(),
                                             logical_bytes(entry, geometry, dtype, rows.contexts,
                                                           rows.valid_columns),
                                             useful_flops(geometry, rows.contexts,

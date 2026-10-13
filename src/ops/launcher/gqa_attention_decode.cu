@@ -1,12 +1,13 @@
 // ninfer::ops - split-KV GQA small-T launcher and unified route dispatcher.
 #include "ops/launcher/gqa_attention.h"
 
+#include "core/arena.h"
+#include "core/device.h" // CUDA_CHECK
 #include "ops/common/math.h"
 #include "ops/kernel/gqa_attention_decode.cuh"
 #include "ops/kernel/gqa_attention_decode_bf16.cuh"
 #include "ops/kernel/gqa_attention_decode_i8.cuh"
 #include "ops/kernel/gqa_attention_decode_q4.cuh"
-#include "core/device.h" // CUDA_CHECK
 #include "ninfer/ops/gqa_attention.h"
 
 #include <cstdint>
@@ -606,5 +607,152 @@ void gqa_attention_cached_small_t_batch_launch(
         partial_acc, partial_m, partial_l, out, stream);
 }
 
+
+// ---------------------------------------------------------------------------
+// Issue #47 isolated 84-split experiment launchers (benchmark-only).
+//
+// The 84 routes use the same split-capacity policy, partial/reduce kernel
+// selection, and arena allocation pattern (three partial tensors, 256-byte
+// default alignment, acc/m/l order) as the production cached (A3) and append
+// (A1) 27B small-T routes; only the base split count differs (84 = RTX 5080
+// SM count instead of 85). The launchers are 27B-only, accept BF16/I8/U8
+// caches, and reject Q2KV at entry: production Q2KV support stays on the
+// 85-split routes, and no 84 Q2KV launcher exists. They are not referenced by
+// any production dispatcher; the production 85-split routing above is
+// unchanged. The 84-versus-85 A/B is driven exclusively by the op benchmark's
+// --experimental-splits flag; no production or test route selects Gqa27S84.
+// gqa_attention_s84_workspace_capacity_bytes reports the arena bytes that
+// allocation pattern consumes (raw partial-tensor payload plus the 256-byte
+// alignment gap preceding the third allocation); it is not the production
+// 85-split capacity and does not size the benchmark's 85-sized arena.
+// ---------------------------------------------------------------------------
+
+void gqa_attention_cached_small_t_launch_s84(const Tensor& q, const Tensor& pos, float scale,
+                                             const PagedKVLayerView& cache,
+                                             GqaExecutionEnvelope envelope,
+                                             WorkspaceArena& workspace, Tensor& out,
+                                             cudaStream_t stream) {
+    if (q.ne[1] != Gqa27S84Geometry::QHeads ||
+        cache.num_kv_heads != Gqa27S84Geometry::KVHeads) {
+        throw std::invalid_argument("gqa_attention_cached_small_t_launch_s84: 27B-only route");
+    }
+    if (cache.dtype == DType::Q2KV) {
+        throw std::invalid_argument(
+            "gqa_attention_cached_small_t_launch_s84: Q2KV is not enabled");
+    }
+    if (q.ne[2] < 1 || q.ne[2] > 6) {
+        throw std::invalid_argument("gqa_attention_cached_small_t_launch_s84: T must be 1..6");
+    }
+
+    const std::int32_t width = q.ne[2];
+    const auto splits        = gqa_small_t_launch_capacity<Gqa27S84Geometry>(envelope, width,
+                                                           cache.dtype);
+    const GqaCachedInput input{};
+    const GqaSmallTInvocation invocation{
+        .valid_columns = nullptr,
+        .table_rows    = nullptr,
+        .full_width    = q.ne[2],
+        .column_begin  = 0,
+        .width         = width,
+        .batch_size    = 1,
+    };
+
+    const PagedKVBatchLayerView batch_cache = single_row_batch_view(cache);
+    const auto scope                        = workspace.scope();
+    // Arena pattern priced by gqa_attention_s84_workspace_capacity_bytes: three
+    // partial tensors at the arena's 256-byte default alignment, acc/m/l order.
+    Tensor partial_acc =
+        workspace.alloc(DType::BF16, {kGqaHeadDim, Gqa27S84Geometry::QHeads, width, splits});
+    Tensor partial_m =
+        workspace.alloc(DType::FP32, {Gqa27S84Geometry::QHeads, width, splits});
+    Tensor partial_l =
+        workspace.alloc(DType::FP32, {Gqa27S84Geometry::QHeads, width, splits});
+
+    gqa_attention_small_t_launch_for<Gqa27S84Geometry, GqaCachedInput>(
+        q, input, pos, scale, batch_cache, invocation, envelope, partial_acc, partial_m,
+        partial_l, out, stream);
+}
+
+void gqa_attention_small_t_launch_s84(const Tensor& q, const Tensor& k, const Tensor& v,
+                                      const Tensor& pos, const Tensor& valid_columns,
+                                      const Tensor& table_rows, float scale,
+                                      PagedKVBatchLayerView cache, GqaExecutionEnvelope envelope,
+                                      std::int32_t column_begin, std::int32_t width,
+                                      WorkspaceArena& workspace, Tensor& out,
+                                      cudaStream_t stream) {
+    if (q.ne[1] != Gqa27S84Geometry::QHeads ||
+        cache.num_kv_heads != Gqa27S84Geometry::KVHeads) {
+        throw std::invalid_argument("gqa_attention_small_t_launch_s84: 27B-only route");
+    }
+    if (cache.dtype == DType::Q2KV) {
+        throw std::invalid_argument("gqa_attention_small_t_launch_s84: Q2KV is not enabled");
+    }
+    if (width < 1 || width > 6) {
+        throw std::invalid_argument("gqa_attention_small_t_launch_s84: T must be 1..6");
+    }
+
+    const std::int32_t batch  = q.ne[3];
+    const auto splits         = gqa_small_t_launch_capacity<Gqa27S84Geometry>(envelope, width,
+                                                           cache.dtype);
+    const GqaAppendInput input{static_cast<const __nv_bfloat16*>(k.data),
+                               static_cast<const __nv_bfloat16*>(v.data)};
+    const GqaSmallTInvocation invocation{
+        .valid_columns = valid_columns.data == nullptr ? nullptr : &valid_columns,
+        .table_rows    = &table_rows,
+        .full_width    = q.ne[2],
+        .column_begin  = column_begin,
+        .width         = width,
+        .batch_size    = batch,
+    };
+
+    const auto scope     = workspace.scope();
+    const int split_rows = static_cast<int>(splits) * batch;
+    // Arena pattern priced by gqa_attention_s84_workspace_capacity_bytes: three
+    // partial tensors at the arena's 256-byte default alignment, acc/m/l order.
+    Tensor partial_acc =
+        workspace.alloc(DType::BF16, {kGqaHeadDim, Gqa27S84Geometry::QHeads, width, split_rows});
+    Tensor partial_m =
+        workspace.alloc(DType::FP32, {Gqa27S84Geometry::QHeads, width, split_rows});
+    Tensor partial_l =
+        workspace.alloc(DType::FP32, {Gqa27S84Geometry::QHeads, width, split_rows});
+
+    gqa_attention_small_t_launch_for<Gqa27S84Geometry, GqaAppendInput>(
+        q, input, pos, scale, cache, invocation, envelope, partial_acc, partial_m, partial_l, out,
+        stream);
+}
+
+std::size_t gqa_attention_s84_workspace_capacity_bytes(std::int32_t q_heads, DType cache_dtype,
+                                                       std::int32_t tokens, std::int32_t batch,
+                                                       std::int32_t visible)
+{
+    if (q_heads != Gqa27S84Geometry::QHeads || tokens < 1 || tokens > 6 || batch < 1) {
+        throw std::invalid_argument("gqa_attention_s84 workspace: 27B T=1..6 only");
+    }
+    // The 84 launchers route only the production cache formats BF16/I8/U8
+    // (Q2KV is rejected at entry); production Q2KV keeps the 85 capacity
+    // contract, so Q2KV is not a legal 84 profile.
+    if (cache_dtype != DType::BF16 && cache_dtype != DType::I8 && cache_dtype != DType::U8) {
+        throw std::invalid_argument("gqa_attention_s84 workspace: unsupported cache dtype");
+    }
+    const std::int32_t splits = gqa_small_t_launch_capacity<Gqa27S84Geometry>(
+        GqaExecutionEnvelope{
+            static_cast<std::uint32_t>(std::max(visible, 1)),
+            static_cast<std::uint32_t>(std::max(visible, 1)),
+        }, tokens, cache_dtype);
+    // Alignment-aware arena contract for the 84 partial-tensor pattern
+    // (acc/m/l at the arena's 256-byte default alignment). The BF16 payload is
+    // always 256-aligned; the 96-byte FP32 partial payload is 256-aligned only
+    // when tokens*splits*batch is a multiple of 8, so the exact capacity is the
+    // raw payload plus the alignment gap the arena inserts before the third
+    // allocation (at most 224 bytes here). Exact under the arena base being
+    // 256-byte aligned, the same assumption the production 85 capacity dry-run
+    // makes; the in-tree code does not re-verify the cudaMalloc base alignment.
+    const std::int64_t rows    = static_cast<std::int64_t>(tokens) * splits * batch;
+    const std::int64_t fp32    = 96 * rows;
+    const std::int64_t residue = fp32 % 256;
+    const std::int64_t padding = (256 - residue) % 256;
+    return static_cast<std::size_t>(520 * Gqa27S84Geometry::QHeads * rows) +
+           static_cast<std::size_t>(padding);
+}
 
 } // namespace ninfer::ops::detail
