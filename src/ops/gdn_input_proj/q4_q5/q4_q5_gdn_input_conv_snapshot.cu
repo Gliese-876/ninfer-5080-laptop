@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_kernels.h"
 
 #include "core/device.h"
@@ -9,6 +10,7 @@
 #include "ops/linear/q4/q4_rowsplit_gemv.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemv.cuh"
+#include "ops/linear/q5/q5_small_t_mma.cuh"
 
 #include <cuda_bf16.h>
 
@@ -135,6 +137,37 @@ struct Q5GdnSmallTEpilogue {
     }
 };
 
+template <class Geometry, int Tokens, class Publish>
+struct Q5GdnMmaEpilogue {
+    Q5GdnSmallTEpilogue<Geometry, Tokens, Publish> rows;
+
+    template <int ActiveCols>
+    __device__ __forceinline__ void store(int row, int column, float4 value) const {
+        static_assert(ActiveCols == Tokens && (Tokens == 5 || Tokens == 6));
+        static_assert(Geometry::kValueRows % 16 == 0);
+        if (row < Geometry::kValueRows) {
+            // Keep the full FP32 projected row through convolution/history.
+            // Every lane joins each shuffle; only one owner publishes each row.
+            float projected[Tokens];
+            q5_small_t_collect_row<Tokens, false>(value, projected);
+            if ((threadIdx.x & 3) == 0) {
+                rows.template operator()<true, Geometry::kValueRows>(
+                    nullptr, nullptr, Geometry::kValueZRows, Geometry::kValueRows, row, projected);
+            }
+            q5_small_t_collect_row<Tokens, true>(value, projected);
+            if ((threadIdx.x & 3) == 0) {
+                rows.template operator()<true, Geometry::kValueRows>(
+                    nullptr, nullptr, Geometry::kValueZRows, Geometry::kValueRows, row + 8,
+                    projected);
+            }
+        } else {
+            const Q5SmallTStridedStore<Geometry::kValueRows> z_store{
+                nullptr, 0, rows.z, Geometry::kZRows};
+            z_store.template store<Tokens>(row, column, value);
+        }
+    }
+};
+
 template <class Geometry, class Publish, bool TriggerPdl, bool JoinPdl, bool Dependent>
 void launch_q4_t1(const Tensor& x, const Weight& qk_weight,
                   const GdnConvEpilogue<Publish>& qk_epilogue, Tensor& query, cudaStream_t stream) {
@@ -151,7 +184,7 @@ void launch_q4_t1(const Tensor& x, const Weight& qk_weight,
             static_cast<const std::uint8_t*>(qk_weight.qdata),
             static_cast<const std::uint8_t*>(qk_weight.scales),
             static_cast<__nv_bfloat16*>(query.data), nullptr, Geometry::kQkRows, Geometry::kHidden,
-            Q4GdnDecodeEpilogue<Geometry, Publish>{qk_epilogue}));
+            Q4GdnDecodeEpilogue<Geometry, Publish>{qk_epilogue}, Q4GemvIdentityRows{}));
     } else {
         q4_rowsplit_gemv_kernel<Schedule, false, 0, Q4GdnDecodeEpilogue<Geometry, Publish>,
                                 TriggerPdl, JoinPdl><<<q4_blocks, q4_threads, 0, stream>>>(
@@ -159,7 +192,7 @@ void launch_q4_t1(const Tensor& x, const Weight& qk_weight,
             static_cast<const std::uint8_t*>(qk_weight.qdata),
             static_cast<const std::uint8_t*>(qk_weight.scales),
             static_cast<__nv_bfloat16*>(query.data), nullptr, Geometry::kQkRows, Geometry::kHidden,
-            Q4GdnDecodeEpilogue<Geometry, Publish>{qk_epilogue});
+            Q4GdnDecodeEpilogue<Geometry, Publish>{qk_epilogue}, Q4GemvIdentityRows{});
     }
 }
 
@@ -226,6 +259,30 @@ template <class Geometry, int Tokens, class Publish, bool TriggerPdl, bool JoinP
 void launch_q5_small_t(const Tensor& x, const Weight& value_z_weight,
                        const GdnConvEpilogue<Publish>& value_epilogue, Tensor& value, Tensor& z,
                        cudaStream_t stream) {
+    if constexpr (Geometry::kHidden == 5120 && (Tokens == 5 || Tokens == 6)) {
+        using Epilogue = Q5GdnMmaEpilogue<Geometry, Tokens, Publish>;
+        const Epilogue epilogue{{value_epilogue, static_cast<__nv_bfloat16*>(z.data)}};
+        const dim3 grid(Geometry::kValueZRows / 16);
+        if constexpr (Dependent) {
+            CUDA_CHECK(pdl::launch_dependent(
+                {grid, dim3(256), 0, stream},
+                q5_small_t_mma_kernel<Geometry::kValueZRows, Tokens, Epilogue,
+                                      TriggerPdl, JoinPdl>,
+                static_cast<const __nv_bfloat16*>(x.data),
+                static_cast<const std::uint8_t*>(value_z_weight.qdata),
+                static_cast<const std::uint8_t*>(value_z_weight.qhigh),
+                static_cast<const std::uint8_t*>(value_z_weight.scales), epilogue));
+        } else {
+            q5_small_t_mma_kernel<Geometry::kValueZRows, Tokens, Epilogue,
+                                  TriggerPdl, JoinPdl><<<grid, 256, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(x.data),
+                static_cast<const std::uint8_t*>(value_z_weight.qdata),
+                static_cast<const std::uint8_t*>(value_z_weight.qhigh),
+                static_cast<const std::uint8_t*>(value_z_weight.scales), epilogue);
+        }
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     constexpr int q5_threads = 4 * 32;
     const dim3 q5_grid(Geometry::kValueZRows, 1u, 1u);
     if constexpr (Dependent) {
@@ -365,6 +422,22 @@ void launch_conv_by_geometry(const Tensor& x, const Weight& qk_weight, const Wei
 }
 
 } // namespace
+
+void q4_q5_gdn_input_conv_t5_mma_prewarm() {
+    cudaFuncAttributes attributes{};
+    using Snapshot = Q5GdnMmaEpilogue<GdnSnapshotGeometry27, 5, SnapshotHistoryPublish>;
+    using Record = Q5GdnMmaEpilogue<GdnSnapshotGeometry27, 5, RecordColumnPublish>;
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attributes, q5_small_t_mma_kernel<12288, 5, Snapshot, true, false>));
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attributes, q5_small_t_mma_kernel<12288, 5, Record, true, false>));
+    using Snapshot6 = Q5GdnMmaEpilogue<GdnSnapshotGeometry27, 6, SnapshotHistoryPublish>;
+    using Record6 = Q5GdnMmaEpilogue<GdnSnapshotGeometry27, 6, RecordColumnPublish>;
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attributes, q5_small_t_mma_kernel<12288, 6, Snapshot6, true, false>));
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attributes, q5_small_t_mma_kernel<12288, 6, Record6, true, false>));
+}
 
 void q4_q5_gdn_input_conv_snapshot_launch(const Tensor& x, const Weight& qk_weight,
                                           const Weight& value_z_weight, const Tensor& conv_weight,

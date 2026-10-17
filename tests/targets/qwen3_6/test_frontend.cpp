@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include <ninfer/targets/qwen3_6/frontend.h>
 #include <ninfer/targets/qwen3_6/frontend_resources.h>
 
@@ -17,6 +18,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <iostream>
@@ -60,6 +63,16 @@ std::string read_file(const char* path) {
 
 std::string read_template_fixture(const char* path) {
     std::string source = read_file(path);
+    // These text fixtures describe the canonical LF artifact bytes. Git checkouts on Windows
+    // may use CRLF; canonicalize only fixture transport, never production artifact resources.
+    std::size_t output = 0;
+    for (std::size_t index = 0; index < source.size(); ++index) {
+        if (source[index] == '\r' && index + 1 < source.size() && source[index + 1] == '\n') {
+            continue;
+        }
+        source[output++] = source[index];
+    }
+    source.resize(output);
     if (!source.empty() && source.back() == '\n') { source.pop_back(); }
     return source;
 }
@@ -1356,6 +1369,195 @@ int test_media_preparation_cancellation() {
     return check(false, "cancelled media preparation completed successfully");
 }
 
+int test_pure_text_cached_count_and_checkpoint() {
+    FrontendResources assets = resources();
+    auto tokenizer_json = nlohmann::json::parse(assets.tokenizer_json);
+    tokenizer_json["model"]["vocab"]["xx"] = 22;
+    tokenizer_json["model"]["merges"] = nlohmann::json::array({"x x"});
+    assets.tokenizer_json = tokenizer_json.dump();
+    const Frontend frontend = FrontendFactory::create_component(assets, false);
+    const fi::Tokenizer reference({assets.tokenizer_json, assets.tokenizer_config_json,
+                                    assets.generation_config_json});
+    int failures = 0;
+    std::string content(4096, 'x');
+    for (int turn = 0; turn < 3; ++turn) {
+        content += "xx";
+        fi::ChatRenderOptions rendering;
+        rendering.enable_thinking = false;
+        rendering.preserve_thinking = true;
+        const fi::RenderedChat rendered = render_chat(
+            {chat_message(ninfer::ChatRole::User, content)}, rendering);
+        const auto expected = fi::encode_rendered_chat(reference, rendered, false);
+        ninfer::PromptInput input;
+        ninfer::ChatMessage user;
+        user.role = ninfer::ChatRole::User;
+        user.parts.push_back({.kind = ninfer::MessagePartKind::Text, .text = content, .media = {}});
+        input.messages.push_back(std::move(user));
+        input.options.enable_thinking = false;
+        input.options.preserve_thinking = true;
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            failures += check(frontend.count_tokens(input) == expected.input_ids.size(),
+                              "cached count changed uncached token count");
+            const auto prepared = frontend.prepare(input);
+            const auto& actual = FrontendFactory::inspect(prepared);
+            failures += check(std::equal(actual.token_ids.begin(), actual.token_ids.end(),
+                                           expected.input_ids.begin(), expected.input_ids.end()) &&
+                                  actual.identity.rewrite_checkpoint && expected.rewrite_checkpoint &&
+                                  actual.identity.rewrite_checkpoint->frontier ==
+                                      expected.rewrite_checkpoint->frontier &&
+                                  actual.identity.rewrite_checkpoint->kind == expected.rewrite_checkpoint->kind,
+                              "cached prepare changed exact IDs or checkpoint");
+            for (std::size_t token = 0; token < actual.token_ids.size(); ++token) {
+                failures += check(actual.token_types[token] == 0 && actual.rope_delta == 0 &&
+                                      actual.positions[token] == static_cast<std::int32_t>(token) &&
+                                      actual.positions[actual.token_ids.size() + token] ==
+                                          static_cast<std::int32_t>(token) &&
+                                      actual.positions[2 * actual.token_ids.size() + token] ==
+                                          static_cast<std::int32_t>(token),
+                                  "cached prepare changed text identity metadata");
+            }
+        }
+    }
+    fi::Tokenizer checkpoint_tokenizer({assets.tokenizer_json, assets.tokenizer_config_json,
+                                          assets.generation_config_json});
+    fi::RenderedChat invalid;
+    invalid.text = std::string(4096, 'x');
+    invalid.rewrite_checkpoint = fi::RewriteCheckpointByteSpec{.offset = 4095};
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        bool rejected = false;
+        try { (void)fi::encode_rendered_chat(checkpoint_tokenizer, invalid, true); }
+        catch (const std::logic_error&) { rejected = true; }
+        failures += check(rejected, "cache hit bypassed exact checkpoint BPE-boundary validation");
+    }
+    return failures;
+}
+
+// Opt-in CPU qualification against full old-tokenizer vectors from actual 100K requests.
+// Frontend construction/preparation does not create an Engine or execute CUDA.
+int test_actual_long_text_cache_vectors() {
+    const char* model = std::getenv("NINFER_TOKENIZER_CPU_MODEL");
+    if (!model) { return 0; }
+    const char* reference_path = std::getenv("NINFER_TOKENIZER_CPU_REFERENCE");
+    const char* requests_path = std::getenv("NINFER_TOKENIZER_CPU_REQUESTS");
+    const char* output_path = std::getenv("NINFER_TOKENIZER_CPU_OUTPUT");
+    if (!reference_path || !requests_path || !output_path) {
+        throw std::invalid_argument("actual CPU vectors require reference, requests and output paths");
+    }
+    std::ifstream artifact(model, std::ios::binary);
+    std::array<unsigned char, 16> header{};
+    artifact.read(reinterpret_cast<char*>(header.data()), header.size());
+    if (!artifact || std::string_view(reinterpret_cast<const char*>(header.data()), 8) !=
+                         std::string_view("NINFER\0\2", 8)) {
+        throw std::invalid_argument("actual CPU vectors require NInfer v2");
+    }
+    std::uint64_t directory_bytes = 0;
+    for (int byte = 0; byte < 8; ++byte) {
+        directory_bytes |= std::uint64_t(header[8 + byte]) << (8 * byte);
+    }
+    if (directory_bytes > 16 * 1024 * 1024) { throw std::invalid_argument("invalid artifact directory"); }
+    std::string raw_directory(directory_bytes, '\0');
+    artifact.read(raw_directory.data(), raw_directory.size());
+    const auto directory = nlohmann::json::parse(raw_directory);
+    const std::uint64_t payload = (16 + directory_bytes + 4095) / 4096 * 4096;
+    FrontendResources assets;
+    for (const auto& object : directory.at("objects")) {
+        const std::string name = object.at("name");
+        std::string* destination = nullptr;
+        if (name == "frontend/tokenizer.json") { destination = &assets.tokenizer_json; }
+        if (name == "frontend/tokenizer_config.json") { destination = &assets.tokenizer_config_json; }
+        if (name == "frontend/chat_template.jinja") { destination = &assets.chat_template_jinja; }
+        if (name == "frontend/generation_config.json") { destination = &assets.generation_config_json; }
+        if (name == "frontend/preprocessor_config.json") { destination = &assets.preprocessor_config_json; }
+        if (name == "frontend/video_preprocessor_config.json") { destination = &assets.video_preprocessor_config_json; }
+        if (!destination) { continue; }
+        destination->resize(object.at("bytes").get<std::size_t>());
+        artifact.seekg(payload + object.at("offset").get<std::uint64_t>());
+        artifact.read(destination->data(), destination->size());
+        if (!artifact) { throw std::invalid_argument("truncated frontend resource"); }
+    }
+    const Frontend frontend = FrontendFactory::create_component(assets, false);
+    const auto reference = nlohmann::json::parse(read_file(reference_path));
+    nlohmann::json receipt = {{"scope", "actual production Frontend CPU-only full vectors"},
+                               {"cases", nlohmann::json::array()}};
+    const std::filesystem::path output(output_path);
+    std::filesystem::create_directories(output);
+    int failures = 0;
+    for (const auto& record : reference.at("cases")) {
+        const std::string name = record.at("name");
+        const auto request_file = std::filesystem::path(requests_path) / name / "request.json";
+        const auto request = nlohmann::json::parse(read_file(request_file.string().c_str()));
+        ninfer::PromptInput input;
+        input.options.enable_thinking = request.at("enable_thinking").get<bool>();
+        input.options.preserve_thinking = request.at("preserve_thinking").get<bool>();
+        if (request.contains("reasoning_effort")) {
+            throw std::invalid_argument("CPU fixture adapter intentionally excludes reasoning_effort");
+        }
+        for (const auto& tool : request.at("tools")) { input.options.tool_jsons.push_back(tool.dump()); }
+        for (const auto& item : request.at("messages")) {
+            ninfer::ChatMessage message;
+            const std::string role = item.at("role");
+            if (role == "system") { message.role = ninfer::ChatRole::System; }
+            else if (role == "user") { message.role = ninfer::ChatRole::User; }
+            else if (role == "assistant") { message.role = ninfer::ChatRole::Assistant; }
+            else if (role == "tool") { message.role = ninfer::ChatRole::Tool; }
+            else { throw std::invalid_argument("unexpected actual CPU fixture role"); }
+            message.parts.push_back({.kind = ninfer::MessagePartKind::Text,
+                                     .text = item.at("content").get<std::string>(), .media = {}});
+            message.reasoning_content = item.value("reasoning_content", std::string{});
+            message.tool_call_id = item.value("tool_call_id", std::string{});
+            if (item.contains("tool_calls")) {
+                for (const auto& call : item.at("tool_calls")) {
+                    message.tool_calls.push_back({.id = call.at("id").get<std::string>(),
+                        .name = call.at("function").at("name").get<std::string>(),
+                        .arguments_json = call.at("function").at("arguments").get<std::string>()});
+                }
+            }
+            input.messages.push_back(std::move(message));
+        }
+        const auto expected = record.at("reference").at("tokens").get<std::vector<int>>();
+        const auto frontier = record.at("reference").at("checkpoint_tokens").size();
+        const auto count = frontend.count_tokens(input);
+        const auto prepared = frontend.prepare(std::move(input));
+        const auto& actual = FrontendFactory::inspect(prepared);
+        bool exact = count == expected.size() && actual.token_ids.size() == expected.size() &&
+            std::equal(actual.token_ids.begin(), actual.token_ids.end(), expected.begin(), expected.end()) &&
+            actual.token_types.size() == count && actual.positions.size() == 3 * count &&
+            actual.rope_delta == 0 && actual.vision_items.empty() && actual.media_payloads.empty() &&
+            actual.identity.reusable && !actual.reasoning_budget &&
+            actual.starts_in_reasoning == request.at("enable_thinking").get<bool>() &&
+            actual.identity.rewrite_checkpoint &&
+            actual.identity.rewrite_checkpoint->frontier == frontier &&
+            actual.identity.rewrite_checkpoint->kind ==
+                ninfer::targets::qwen3_6::RewriteCheckpointKind::ResponseReplay;
+        for (std::size_t index = 0; index < actual.token_types.size(); ++index) {
+            exact = exact && actual.token_types[index] == 0;
+        }
+        if (actual.positions.size() == 3 * count) {
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                for (std::size_t index = 0; index < count; ++index) {
+                    exact = exact && actual.positions[axis * count + index] == static_cast<std::int32_t>(index);
+                }
+            }
+        }
+        const auto dump = [&](const std::string& extension, const auto& values) {
+            std::ofstream file(output / (name + extension), std::ios::binary);
+            file.write(reinterpret_cast<const char*>(values.data()), values.size() * sizeof(values[0]));
+            if (!file) { throw std::runtime_error("cannot save complete CPU frontend vectors"); }
+        };
+        dump(".ids.i32", actual.token_ids);
+        dump(".positions.i32", actual.positions);
+        dump(".types.u8", actual.token_types);
+        receipt["cases"].push_back({{"name", name}, {"tokens", count}, {"exact", exact},
+                                      {"checkpoint_frontier", frontier},
+                                      {"tokenize_seconds", actual.prepare.tokenize_seconds}});
+        failures += check(exact, "actual long production Frontend changed old IDs/count/identity metadata");
+    }
+    receipt["passed"] = failures == 0;
+    std::ofstream file(output / "frontend-vectors.json");
+    file << receipt.dump(2) << '\n';
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -1386,6 +1588,8 @@ int main() {
     failures += test_media_cache_runs_independent_misses_in_parallel();
     failures += test_many_images_prepare_in_one_parallel_batch();
     failures += test_media_preparation_cancellation();
+    failures += test_pure_text_cached_count_and_checkpoint();
+    failures += test_actual_long_text_cache_vectors();
     failures += test_disabled_vision();
     return failures == 0 ? 0 : 1;
 }

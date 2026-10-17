@@ -1,19 +1,28 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "targets/qwen3_6/impl/frontend/tokenizer.h"
+#include "targets/qwen3_6/impl/frontend/tokenizer_test_access.h"
 
 #include "text/unicode.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <list>
+#include <memory>
+#include <mutex>
+#include <new>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -23,6 +32,60 @@ namespace {
 
 using Json    = nlohmann::json;
 namespace uni = ninfer::text::unicode_internal;
+
+struct CacheBudget {
+    explicit CacheBudget(std::size_t limit) : capacity(limit) {}
+    const std::size_t capacity;
+    std::atomic<std::size_t> used{0};
+};
+
+// Charge actual allocator requests, including list nodes and string/vector capacities.
+// Cache object and its one fixed budget-control block are constant host overhead.
+template <class T>
+class CacheAllocator {
+public:
+    using value_type = T;
+    using propagate_on_container_move_assignment = std::true_type;
+
+    CacheAllocator() = default;
+    explicit CacheAllocator(std::shared_ptr<CacheBudget> budget) : budget_(std::move(budget)) {}
+    template <class U>
+    CacheAllocator(const CacheAllocator<U>& other) noexcept : budget_(other.budget_) {}
+
+    T* allocate(std::size_t count) {
+        if (!budget_ || count > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+            throw std::bad_alloc();
+        }
+        const std::size_t bytes = count * sizeof(T);
+        std::size_t current = budget_->used.load(std::memory_order_relaxed);
+        do {
+            if (bytes > budget_->capacity || current > budget_->capacity - bytes) {
+                throw std::bad_alloc();
+            }
+        } while (!budget_->used.compare_exchange_weak(current, current + bytes,
+                                                       std::memory_order_relaxed));
+        try {
+            return std::allocator<T>{}.allocate(count);
+        } catch (...) {
+            budget_->used.fetch_sub(bytes, std::memory_order_relaxed);
+            throw;
+        }
+    }
+
+    void deallocate(T* pointer, std::size_t count) noexcept {
+        std::allocator<T>{}.deallocate(pointer, count);
+        budget_->used.fetch_sub(count * sizeof(T), std::memory_order_relaxed);
+    }
+
+    template <class U>
+    bool operator==(const CacheAllocator<U>& other) const noexcept {
+        return budget_ == other.budget_;
+    }
+
+private:
+    std::shared_ptr<CacheBudget> budget_;
+    template <class> friend class CacheAllocator;
+};
 
 constexpr std::int64_t kMaxTokenId = 1'000'000;
 
@@ -599,7 +662,119 @@ void append_bpe_ids(std::vector<int>& ids, std::string_view text, bool has_bpe_m
 
 } // namespace
 
-Tokenizer::Tokenizer(TokenizerResources resources) {
+class Tokenizer::OrdinaryRunCache {
+    struct Entry {
+        using Text = std::basic_string<char, std::char_traits<char>, CacheAllocator<char>>;
+        Entry(std::size_t key_hash, std::string_view raw, std::span<const int> tokens,
+              const std::shared_ptr<CacheBudget>& budget)
+            : hash(key_hash), text(raw.begin(), raw.end(), CacheAllocator<char>(budget)),
+              ids(tokens.begin(), tokens.end(), CacheAllocator<int>(budget)) {}
+        std::size_t hash;
+        Text text;
+        std::vector<int, CacheAllocator<int>> ids;
+    };
+
+public:
+    explicit OrdinaryRunCache(TokenizationCacheOptions options)
+        : options_(options), budget_(std::make_shared<CacheBudget>(options.capacity_bytes)),
+          entries_(CacheAllocator<Entry>(budget_)) {}
+
+    bool append_hit(std::vector<int>& output, std::string_view raw) {
+        if (!eligible(raw)) { return false; }
+        const std::size_t hash = key_hash(raw);
+        std::lock_guard lock(mutex_);
+        for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+            if (it->hash != hash || it->text.size() != raw.size() ||
+                !std::equal(raw.begin(), raw.end(), it->text.begin())) {
+                continue;
+            }
+            // A bounded memory copy under the lock avoids live leases beyond the cache budget.
+            // Normalization, splitting and BPE are always outside this lock.
+            output.insert(output.end(), it->ids.begin(), it->ids.end());
+            entries_.splice(entries_.begin(), entries_, it);
+            ++hits_;
+            return true;
+        }
+        ++misses_;
+        return false;
+    }
+
+    void remember(std::string_view raw, std::span<const int> tokens) {
+        if (!eligible(raw)) { return; }
+        const std::size_t hash = key_hash(raw);
+        // The allocator enforces the hard budget; this conservative estimate only guides LRU
+        // eviction. An unexpectedly larger allocation safely bypasses caching.
+        if (raw.size() > options_.max_entry_bytes ||
+            tokens.size() > options_.max_entry_bytes / sizeof(int)) {
+            std::lock_guard lock(mutex_);
+            ++bypasses_;
+            return;
+        }
+        const std::size_t estimate = raw.size() + tokens.size() * sizeof(int) + sizeof(Entry) +
+                                     4 * sizeof(void*) + 64;
+        std::lock_guard lock(mutex_);
+        if (estimate > options_.max_entry_bytes || estimate > options_.capacity_bytes) {
+            ++bypasses_;
+            return;
+        }
+        for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+            if (it->hash == hash && it->text.size() == raw.size() &&
+                std::equal(raw.begin(), raw.end(), it->text.begin())) {
+                entries_.splice(entries_.begin(), entries_, it);
+                return;
+            }
+        }
+        while (!entries_.empty() &&
+               (entries_.size() >= options_.max_entries ||
+                budget_->used.load(std::memory_order_relaxed) > options_.capacity_bytes - estimate)) {
+            entries_.pop_back();
+            ++evictions_;
+        }
+        try {
+            entries_.emplace_front(hash, raw, tokens, budget_);
+        } catch (const std::bad_alloc&) {
+            // Tokenization already succeeded. Optional cache admission never rejects a prompt.
+            ++bypasses_;
+        }
+    }
+
+    TokenizationCacheStats stats() const {
+        std::lock_guard lock(mutex_);
+        return {.capacity_bytes = options_.capacity_bytes,
+                .managed_bytes = budget_->used.load(std::memory_order_relaxed),
+                .entries = entries_.size(), .hits = hits_, .misses = misses_,
+                .evictions = evictions_, .bypasses = bypasses_};
+    }
+
+    void force_hash_collisions() {
+        std::lock_guard lock(mutex_);
+        entries_.clear();
+        force_collisions_.store(true, std::memory_order_relaxed);
+    }
+
+private:
+    bool eligible(std::string_view raw) const noexcept {
+        return options_.capacity_bytes != 0 && options_.max_entries != 0 &&
+               raw.size() >= options_.min_run_bytes;
+    }
+    std::size_t key_hash(std::string_view raw) const noexcept {
+        return force_collisions_.load(std::memory_order_relaxed)
+                   ? 0 : std::hash<std::string_view>{}(raw);
+    }
+
+    const TokenizationCacheOptions options_;
+    std::shared_ptr<CacheBudget> budget_;
+    std::list<Entry, CacheAllocator<Entry>> entries_;
+    mutable std::mutex mutex_;
+    std::atomic<bool> force_collisions_{false};
+    std::size_t hits_ = 0;
+    std::size_t misses_ = 0;
+    std::size_t evictions_ = 0;
+    std::size_t bypasses_ = 0;
+};
+
+Tokenizer::Tokenizer(TokenizerResources resources, TokenizationCacheOptions cache)
+    : ordinary_run_cache_(std::make_unique<OrdinaryRunCache>(cache)) {
     if (resources.tokenizer_json.empty() || resources.tokenizer_config_json.empty() ||
         resources.generation_config_json.empty()) {
         throw std::invalid_argument("embedded tokenizer resources are empty");
@@ -639,7 +814,26 @@ Tokenizer::Tokenizer(TokenizerResources resources) {
     default_stop_token_ids_ = load_default_stop_token_ids(resources.generation_config_json);
 }
 
+Tokenizer::~Tokenizer() = default;
+Tokenizer::Tokenizer(Tokenizer&&) noexcept = default;
+Tokenizer& Tokenizer::operator=(Tokenizer&&) noexcept = default;
+
+TokenizationCacheStats Tokenizer::cache_stats() const { return ordinary_run_cache_->stats(); }
+
+void TokenizerCacheTestAccess::force_hash_collisions(Tokenizer& tokenizer) {
+    tokenizer.ordinary_run_cache_->force_hash_collisions();
+}
+
 std::vector<int> Tokenizer::encode(std::string_view text, EncodeOptions options) const {
+    return encode_impl(text, options, false);
+}
+
+std::vector<int> Tokenizer::encode_cached(std::string_view text, EncodeOptions options) const {
+    return encode_impl(text, options, true);
+}
+
+std::vector<int> Tokenizer::encode_impl(std::string_view text, EncodeOptions options,
+                                      bool cache) const {
     if (text.empty()) { return {}; }
     if (!options.parse_added_tokens) {
         std::vector<int> ids;
@@ -648,6 +842,12 @@ std::vector<int> Tokenizer::encode(std::string_view text, EncodeOptions options)
     }
 
     std::vector<int> ids;
+    const auto append_ordinary = [&](std::string_view raw) {
+        if (cache && ordinary_run_cache_->append_hit(ids, raw)) { return; }
+        const std::size_t begin = ids.size();
+        append_bpe_ids(ids, raw, has_bpe_merges_, bpe_merge_ranks_, vocab_token_to_id_);
+        if (cache) { ordinary_run_cache_->remember(raw, std::span<const int>(ids).subspan(begin)); }
+    };
     std::size_t ordinary_begin = 0;
     std::size_t pos            = 0;
     while (pos < text.size()) {
@@ -668,8 +868,7 @@ std::vector<int> Tokenizer::encode(std::string_view text, EncodeOptions options)
         }
 
         if (pos > ordinary_begin) {
-            append_bpe_ids(ids, text.substr(ordinary_begin, pos - ordinary_begin), has_bpe_merges_,
-                           bpe_merge_ranks_, vocab_token_to_id_);
+            append_ordinary(text.substr(ordinary_begin, pos - ordinary_begin));
         }
 
         ids.push_back(match_token->id);
@@ -677,8 +876,7 @@ std::vector<int> Tokenizer::encode(std::string_view text, EncodeOptions options)
         ordinary_begin = pos;
     }
     if (ordinary_begin < text.size()) {
-        append_bpe_ids(ids, text.substr(ordinary_begin), has_bpe_merges_, bpe_merge_ranks_,
-                       vocab_token_to_id_);
+        append_ordinary(text.substr(ordinary_begin));
     }
     return ids;
 }

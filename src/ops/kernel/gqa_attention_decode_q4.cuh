@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 // ninfer::ops - split-KV GQA small-T attention, int8 KV-cache partial kernel.
@@ -30,6 +31,18 @@
 
 namespace ninfer::ops {
 
+// Native signed-Q4 matrix loads expand the packed K row into the exact I8 MMA
+// B fragment. Preserve adjacent 8-byte rows within each swizzled 16-byte segment.
+__device__ __forceinline__ int gqa_decode_q4_k_swz(int row, int packed_byte) {
+    return (((packed_byte >> 4) ^ (row & 7)) << 4) | (packed_byte & 15);
+}
+
+__device__ __forceinline__ void gqa_decode_q4_ldmatrix_s8(unsigned& b0, unsigned& b1,
+                                                        unsigned address) {
+    asm volatile("ldmatrix.sync.aligned.m8n16.x2.shared::cta.s8.s4 {%0,%1}, [%2];\n"
+                 : "=r"(b0), "=r"(b1) : "r"(address));
+}
+
 // Store one int8 code into a d-contiguous-as-b16 swizzled tile so the same
 // gqa_small_t_tc_swz / ldmatrix path that serves bf16 tiles serves the int8 tile.
 // A b16 lane holds two packed int8 (d even = low byte, d odd = high byte); this
@@ -55,7 +68,8 @@ __device__ __forceinline__ void gqa_small_t_q4_store_swz(std::int8_t* tile, int 
 // dequantize V while producers execute QK. After both consume the code tile, the
 // next K/V tile is prefetched into the same arena while the current PV runs.
 template <typename Geometry, int TokenTile, int WarpsPerCta, int MinBlocksPerSm, int KeyBlock,
-          bool DynamicArena, bool MultiBatch, bool Masked, typename CacheInput>
+          bool DynamicArena, bool MultiBatch, bool Masked, typename CacheInput,
+          bool NativeQ4K = true, bool PackedTransfer16 = true>
 __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     void gqa_attention_decode_q4_tiled_kernel(
         const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, std::uint8_t* cache_k_q4,
@@ -84,19 +98,30 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     constexpr int ProducerThreads = RowTiles * 32;
     constexpr int VLoaderThreads  = Threads - ProducerThreads;
 
-    // T=4/Bc32 keeps V in native packed-Q4 form while it is prefetched
+    // T=4..6/group6/Bc32 keeps V in native packed-Q4 form while it is prefetched
     // asynchronously. Consumer warps unpack and dequant directly from
     // packed Q4 into the BF16 PV tile.
     constexpr bool AsyncPackedV =
-        TokenTile == 4 && Geometry::GroupSize == 6 && Bc == 32;
+        TokenTile >= 4 && TokenTile <= 6 && Geometry::GroupSize == 6 && Bc == 32;
 
     // Stage packed K asynchronously alongside V.
     constexpr bool AsyncPackedK = AsyncPackedV;
+    // The false specialization is a test-only expanded-K control. Noncanonical
+    // shapes retain their original staging and arithmetic regardless of this flag.
+    constexpr bool NativePackedK = AsyncPackedK && NativeQ4K;
+    // Explicitly qualified long-context MTP3/T4 and MTP4/T5 C=1 leaves only.
+    // The false policy retains the original8-byte copies for test controls.
+    constexpr bool CopyPacked16 = NativePackedK && PackedTransfer16 &&
+        Geometry::QHeads == 24 && Geometry::KVHeads == 4 &&
+        (TokenTile == 4 || TokenTile == 5) && Wc == 8 && MinBlocksPerSm == 2 &&
+        !DynamicArena && !MultiBatch;
+
 
     // Async V alone needs 7/2 * Bc*D bytes. Async K uses a separate
     // Bc*D/2 packed-K staging region, bringing the arena to 4 * Bc*D.
     constexpr int ArenaBytes =
-        AsyncPackedK ? (4 * Bc * D)
+        NativePackedK ? (3 * Bc * D)
+        : AsyncPackedK ? (4 * Bc * D)
                      : (AsyncPackedV ? (7 * Bc * D / 2)
                                      : (4 * Bc * D));
 
@@ -126,14 +151,14 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 
     std::int8_t* v_i8    = r_s + Bc * D;
     std::uint8_t* v_q4_s =
-        reinterpret_cast<std::uint8_t*>(r_s + Bc * D);
+        reinterpret_cast<std::uint8_t*>(r_s + (NativePackedK ? Bc * D / 2 : Bc * D));
     __nv_bfloat16* v_bf16 = reinterpret_cast<__nv_bfloat16*>(
-        r_s + (AsyncPackedV ? (3 * Bc * D / 2) : (2 * Bc * D)));
+        r_s + (NativePackedK ? Bc * D : (AsyncPackedV ? (3 * Bc * D / 2) : (2 * Bc * D))));
 
-    // Separate packed-K staging area. For T=4 this begins at 28 KiB
+    // Separate packed-K staging area. For Bc32 this begins at 28 KiB
     // and occupies 4 KiB.
     std::uint8_t* k_q4_s = reinterpret_cast<std::uint8_t*>(
-        r_s + (7 * Bc * D / 2));
+        r_s + (NativePackedK ? 0 : (7 * Bc * D / 2)));
 
     __shared__ __align__(16) __nv_bfloat16 p_s[Br * Bc];
     __shared__ float alpha_s[Br];
@@ -370,6 +395,25 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 store_vec(&v_scale_s[key_l * Groups], make_int2(0, 0));
             }
         }
+        if constexpr (CopyPacked16) {
+#pragma unroll 1
+        for (int chunk = tid; chunk < Bc * (D / 32); chunk += Threads) {
+            const int row = chunk / (D / 32);
+            const int byte = (chunk % (D / 32)) * 16;
+            const int key = tile_k0 + row;
+            auto* kd = k_q4_s + row * (D / 2) + gqa_decode_q4_k_swz(row, byte);
+            auto* vd = v_q4_s + row * (D / 2) + byte;
+            if (key >= split_start && key < split_end) {
+                const auto off = gqa_kv_q4_code_index<Geometry>(
+                    physical_page, kv_head, byte * 2, key & kPagedKVPageMask);
+                ninfer::ops::cp_async<16>(kd,cache_k_q4+off);
+                ninfer::ops::cp_async<16>(vd,cache_v_q4+off);
+            } else {
+                store_vec(kd,make_int4(0,0,0,0));
+                store_vec(vd,make_int4(0,0,0,0));
+            }
+        }
+        } else {
 #pragma unroll 1
         for (int chunk = tid; chunk < Bc * (D / 16); chunk += Threads) {
             const int key_l = chunk / (D / 16);
@@ -388,7 +432,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 
                   if constexpr (AsyncPackedK) {
                       std::uint8_t* kdst_q4 =
-                          &k_q4_s[key_l * (D / 2) + (d >> 1)];
+                          &k_q4_s[key_l * (D / 2) +
+                              (NativePackedK ? gqa_decode_q4_k_swz(key_l, d >> 1) : (d >> 1))];
                       ninfer::ops::cp_async<8>(
                           kdst_q4, &cache_k_q4[off]);
                   } else {
@@ -430,7 +475,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                           gqa_small_t_tc_swz(key_l, dc * 8) * 2];
                 if constexpr (AsyncPackedK) {
                     store_vec(
-                        &k_q4_s[key_l * (D / 2) + (d >> 1)],
+                        &k_q4_s[key_l * (D / 2) +
+                            (NativePackedK ? gqa_decode_q4_k_swz(key_l, d >> 1) : (d >> 1))],
                         make_int2(0, 0));
                 } else {
                     store_vec(dst, make_int4(0, 0, 0, 0));
@@ -446,6 +492,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                         make_int4(0, 0, 0, 0));
                 }
             }
+        }
         }
         ninfer::ops::cp_commit();
     };
@@ -484,7 +531,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     int physical_page = physical_pages_s[0];
     issue_kv_tile(first_tile, physical_page);
     ninfer::ops::cp_wait<0>();
-    if constexpr (AsyncPackedK) {
+    if constexpr (AsyncPackedK && !NativePackedK) {
         unpack_k_tile(first_tile);
     }
     __syncthreads();
@@ -528,9 +575,14 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                         const int brow = nt * 8 + b_rin;
                         const int bcol = k * 16 + b_koff;
                         unsigned bf[2];
-                        ldmatrix_x2(
-                            bf[0], bf[1],
-                            smem_addr(&k_b16[brow * DB16 + gqa_small_t_tc_swz(brow, bcol)]));
+                        if constexpr (NativePackedK) {
+                            gqa_decode_q4_ldmatrix_s8(bf[0], bf[1],
+                                smem_addr(k_q4_s + brow * (D / 2) +
+                                          gqa_decode_q4_k_swz(brow, bcol)));
+                        } else {
+                            ldmatrix_x2(bf[0], bf[1],
+                                smem_addr(&k_b16[brow * DB16 + gqa_small_t_tc_swz(brow, bcol)]));
+                        }
                         mma_s8(c0, c1, c2, c3, af[kk][0], af[kk][1], af[kk][2], af[kk][3], bf[0],
                                bf[1]);
                     }
@@ -703,7 +755,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         }
         if (has_next) {
             ninfer::ops::cp_wait<0>();
-            if constexpr (AsyncPackedK) {
+            if constexpr (AsyncPackedK && !NativePackedK) {
                 unpack_k_tile(next_k0);
             }
         }

@@ -1,3 +1,5 @@
+> Record from [toddballinger/ninfer-5080](https://github.com/toddballinger/ninfer-5080). The [project README](../README.md) describes the laptop implementation.
+
 # Benchmarks
 
 ## Canonical v1.5 RTX 5080 benchmark — `ninfer_bench`

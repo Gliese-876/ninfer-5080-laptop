@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 // INT8 Tensor Core primitives for large-token (prefill) quantized GEMM on sm_89.
@@ -108,18 +109,13 @@ __device__ __forceinline__ std::uint32_t int8_pack_s8x4(int a, int b, int c, int
 //
 // `packed12` may contain unrelated upper bits; only the low 12 are consumed.
 __device__ __forceinline__ std::uint32_t q3_codes_to_s8x4(std::uint32_t packed12) {
-    const int q0 = static_cast<int>(packed12 & 0x7u);
-    const int q1 = static_cast<int>((packed12 >> 3) & 0x7u);
-    const int q2 = static_cast<int>((packed12 >> 6) & 0x7u);
-    const int q3 = static_cast<int>((packed12 >> 9) & 0x7u);
-
-    // Sign-extend 3-bit two's complement [-4, 3].
-    const int s0 = (q0 ^ 4) - 4;
-    const int s1 = (q1 ^ 4) - 4;
-    const int s2 = (q2 ^ 4) - 4;
-    const int s3 = (q3 ^ 4) - 4;
-
-    return int8_pack_s8x4(s0, s1, s2, s3);
+    // Spread two six-bit pairs, then each three-bit code into one byte.
+    std::uint32_t x = packed12 & 0x0fffu;
+    x = (x | (x << 10)) & 0x003f003fu;
+    x = (x | (x << 5)) & 0x07070707u;
+    // A sign bit contributes 4 * 62 = 248 within its own byte; no carry
+    // reaches a neighbouring byte. The result is exact signed INT8 [-4,3].
+    return x | ((x & 0x04040404u) * 0x3eu);
 }
 
 

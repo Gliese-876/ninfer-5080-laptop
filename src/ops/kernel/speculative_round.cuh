@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 // Implements: include/ninfer/ops/speculative_round.h
@@ -77,7 +78,8 @@ speculative_store_accept_result(const std::int32_t* row_drafts, std::int32_t k, 
     anchors[row]         = terminal_token;
     lengths[row] += produced;
     if constexpr (UpdateTokenCounts) {
-        if (config->token_counts != nullptr) {
+        // Greedy rows skip the sampling-only count side effect on every route.
+        if (config->temperature > 0.0f && config->token_counts != nullptr) {
             for (int i = 0; i < produced; ++i) {
                 atomicAdd(&config->token_counts[row_tokens[i]], 1);
             }

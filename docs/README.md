@@ -1,99 +1,51 @@
-# NInfer documentation
+# Documentation
 
-Start with the [project README](../README.md) for the validated RTX 5080 profile, official artifact, serving settings and release status.
+Start with the [English README](../README.md) or [简体中文 README](../README.zh-CN.md) for the RTX 5080 Laptop build, official model and recommended MTP-4 text-serving profile.
 
-## RTX 5080 true-128K project guides
+## Current laptop fork
 
-| Document | Purpose |
+| Guide | Purpose |
 |---|---|
-| [Qwen3.8-27B RTX 5080 v1.5 release](RELEASE_QWEN3.8_27B_RTX5080_V1.5.md) | current production release: CUDA 13.4/R615, Blackwell Q3/A8 retune, canonical ninfer_bench corpus and chunk 1792 |
-| [Qwen3.8-27B RTX 5080 v1.4 release](RELEASE_QWEN3.8_27B_RTX5080_V1.4.md) | historical production release: host-mapped embeddings, CUDA Graph, realistic 118K benchmark and Vision-2048 headroom |
-| [Qwen3.8-27B RTX 5080 v1.3 release](RELEASE_QWEN3.8_27B_RTX5080_V1.3.md) | historical v1.3 production runtime, thinking-budget and rolling-tool checkpoint behavior |
-| [Validated manifest](VALIDATED_MANIFEST.md) | immutable model/binary identities and commit-scoped qualification records |
-| [True 128K + Vision on RTX 5080](VISION_128K.md) | current v1.4 Vision-2048 production profile plus historical 1792/2048 memory validation |
-| [Reproducibility](REPRODUCIBILITY.md) | exact model revisions, build path, hashes and runtime settings |
-| [Benchmarks](BENCHMARKS.md) | canonical workflow-118k-v1 results, CUDA Graph A/B, historical long-context and multimodal results |
-| [Memory profile](MEMORY_PROFILE.md) | v1.4 host-mapped embedding headroom, CUDA Graph allowance, mixed quantization and Vision fit |
-| [Upstream sync status](UPSTREAM_SYNC_STATUS.md) | selective semantic-port ledger, production-relevance policy and pending upstream work |
-| [Technical deep dive](TECHNICAL_DEEP_DIVE.md) | architecture and optimization details |
-| [Failures and lessons](FAILURES_AND_LESSONS.md) | dead ends, regressions and recovery work |
-| [History](HISTORY.md) | chronological engineering journey |
-| [Publishing and sharing](PUBLISHING_AND_SHARING.md) | official distribution locations and public-release guidance |
+| [Benchmark methodology](benchmark-methodology.md) | 118K measurement matching [toddballinger/ninfer-5080](https://github.com/toddballinger/ninfer-5080), near-128K real serving workloads and cached Agent latency |
+| [Optimization guide](optimization.md) | CUDA, proposal-head, KV and cache changes; shared MTP-3/MTP-4 coverage |
+| [HTTP serving](serving.md) | APIs, streaming, tools, state, authentication and request options |
+| [CLI](cli.md) | Text, chat history, sampling and MTP options |
+| [Constrained decisions](CONSTRAINED_DECISIONS_USAGE.md) | C++ finite-decision API and supported behavior |
+| [Benchmarks](../bench/README.md) | Public Engine and operator benchmark tools |
+| [Tests](../tests/README.md) | Numerical and runtime test tools |
 
-## Official RTX 5080 artifact
+The executable `--help` output provides the exact CLI option spelling. The root README defines this fork's recommended profile.
 
-The project-maintained public artifact is:
+## Release records from [toddballinger/ninfer-5080](https://github.com/toddballinger/ninfer-5080)
 
-**[ninfer-5080/Qwen3.8-27B-RTX5080](https://huggingface.co/ninfer-5080/Qwen3.8-27B-RTX5080)**
+These records describe the desktop RTX 5080 branch and earlier releases. Their measured values and historical runtime settings remain attributable to those releases.
 
-```text
-file:   qwen3_8_27b.ninfer
-bytes:  16461267456
-SHA256: c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21
-```
-
-This is the canonical validated artifact for the RTX 5080 true-128K profile. Runtime releases may advance independently while continuing to use the same model artifact.
-
-## General user guides
-
-| Document | Purpose |
+| Record | Scope |
 |---|---|
-| [Constrained decisions](CONSTRAINED_DECISIONS_USAGE.md) | current C++ finite-decision API, multi-token tries, dependencies, result semantics and backend limitations |
-| [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP and common runtime options |
-| [HTTP serving](serving.md) | OpenAI Responses/Chat Completions, Anthropic Messages, state, streaming, token counting, authentication, tools and multimodal input |
-| [Performance](performance.md) | general performance results and reproduction commands |
-| [CLI examples](../examples/cli/) | committed text, multimodal, thinking, long-decode and long-context inputs |
+| [v1.5 release](RELEASE_QWEN3.8_27B_RTX5080_V1.5.md) | Desktop RTX 5080 release used as this fork's starting point |
+| [v1.4](RELEASE_QWEN3.8_27B_RTX5080_V1.4.md), [v1.3](RELEASE_QWEN3.8_27B_RTX5080_V1.3.md), [v1.2](RELEASE_QWEN3.8_27B_RTX5080_V1.2.md) | Earlier desktop releases |
+| [Benchmark history](BENCHMARKS.md) | Published desktop results and historical regression data |
+| [Validated manifest](VALIDATED_MANIFEST.md) | Source, binary and artifact identities |
+| [Vision 128K](VISION_128K.md) | Multimodal profiles and validation |
+| [Memory profile](MEMORY_PROFILE.md) | Weight, KV and Vision memory records |
+| [Reproducibility history](REPRODUCIBILITY.md) | Historical desktop build and launch settings |
+| [Integration history](UPSTREAM_SYNC_STATUS.md) | Desktop branch's selective-port ledger |
+| [Technical deep dive](TECHNICAL_DEEP_DIVE.md) | Architecture and optimization explanation |
 
-The executable `--help` output remains the exact source for command-line option spelling and defaults.
-
-Architecture/history for constrained decisions is recorded in
-[CONSTRAINED_DECISIONS.md](CONSTRAINED_DECISIONS.md) and the linked V2 ADR and
-milestone documents. Use the current usage guide above for implemented behavior.
-
-## Other upstream/community model artifacts
-
-These are separate from the project-maintained RTX 5080 artifact above:
-
-| Model | Weights | Download | Versioned model card source |
-|---|---|---|---|
-| Qwen3.6-27B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | [model card](../model-cards/Qwen3.6-27B-NInfer/README.md) |
-| Qwen3.6-27B | `nvfp4` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) | [model card](../model-cards/Qwen3.6-27B-nvfp4-NInfer/README.md) |
-| Qwen3.8-27B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | [model card](../model-cards/Qwen3.8-27B-NInfer/README.md) |
-| Qwen3.8-27B | `nvfp4` | [Hugging Face](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) | [model card](../model-cards/Qwen3.8-27B-nvfp4-NInfer/README.md) |
-| Qwen3.6-35B-A3B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | [model card](../model-cards/Qwen3.6-35B-A3B-NInfer/README.md) |
-
-## Repository-local guides
-
-- [Benchmarks](../bench/README.md)
-- [Tests](../tests/README.md)
-- [Maintainer tools](../tools/README.md)
-- [Capability evaluation](../eval/README.md)
+The official artifact is [ninfer-5080/Qwen3.8-27B-RTX5080](https://huggingface.co/ninfer-5080/Qwen3.8-27B-RTX5080). Its SHA-256 remains `c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21`.
 
 ## Maintainer references
 
-The active references under [`maintainer/`](maintainer/) record current architecture, model, artifact and maintenance contracts. These files are not additional user workflows or installed API documentation.
+The files in [`maintainer/`](maintainer/) describe architecture and implementation contracts:
 
-Runtime and Op references:
+- [Operator development](maintainer/op-development.md), [Linear benchmarks](maintainer/linear-benchmark.md) and [concurrent inference](maintainer/concurrent-inference-architecture.md).
+- [Paged KV](maintainer/paged-kv-cache.md), [embedding residency](maintainer/embedding-host-offload.md) and [ReplaySSM GDN](maintainer/replayssm-gdn.md).
+- [Artifact container](maintainer/artifact-container.md), [numeric formats](maintainer/tensor-formats.md) and [storage layouts](maintainer/storage-layouts.md).
+- [Qwen3.8-27B artifact contract](maintainer/qwen3.8-27b-artifact.md), with its inherited [Qwen model semantics](maintainer/qwen3.6-27b-model.md).
+- [Qwen3.6-27B](maintainer/qwen3.6-27b-model.md), [Qwen3.6-35B-A3B](maintainer/qwen3.6-35b-a3b-model.md) and the other retained model references.
 
-- [Small-scale concurrent inference architecture](maintainer/concurrent-inference-architecture.md)
-- [Paged KV context storage, ownership, and capacity model](maintainer/paged-kv-cache.md)
-- [Op admission, contracts, ownership, qualification, and performance rules](maintainer/op-development.md)
-- [ReplaySSM GDN technical reference](maintainer/replayssm-gdn.md)
-- [Linear benchmark contract and registered suites](maintainer/linear-benchmark.md)
-- [Embedding host residency](maintainer/embedding-host-offload.md)
+[Softmax Attention](maintainer/softmax-attention.md) records a planned migration. Current dispatch and runtime behavior are defined by the source and public API.
 
-Artifact and model references:
+## Additional material from [toddballinger/ninfer-5080](https://github.com/toddballinger/ninfer-5080)
 
-- [NInfer artifact container](maintainer/artifact-container.md)
-- [Persistent tensor numeric formats](maintainer/tensor-formats.md)
-- [Persistent storage layouts](maintainer/storage-layouts.md)
-- [Qwen3.6-27B model semantics](maintainer/qwen3.6-27b-model.md)
-- [Qwen3.6-27B artifact contracts, including NVFP4](maintainer/qwen3.6-27b-artifact.md)
-- [Qwen3.8-27B DFlash2 mathematics and Engine state contract](maintainer/qwen3.8-27b-dflash2.md)
-- [Qwen3.8-27B artifact contracts, including the NVFP4 target](maintainer/qwen3.8-27b-artifact.md)
-- [Qwen3.6-35B-A3B model semantics](maintainer/qwen3.6-35b-a3b-model.md)
-- [Qwen3.6-35B-A3B artifact contracts](maintainer/qwen3.6-35b-a3b-artifact.md)
-
-Pending implementation work:
-
-- [Softmax Attention organization and migration](maintainer/softmax-attention.md) describes the single target state for an unfinished source/public-contract cutover; it is not the current implementation map.
+The repository retains [CLI examples](../examples/cli/), [maintainer tools](../tools/README.md), [capability evaluation](../eval/README.md) and [model cards](../model-cards/). Their licenses and source attribution remain with the corresponding material.

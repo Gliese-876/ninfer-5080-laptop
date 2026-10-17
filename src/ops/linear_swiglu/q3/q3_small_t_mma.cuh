@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include "ops/common/mma.cuh"
@@ -57,6 +58,7 @@ union Q3SmallTBf16PairBits {
 // Decode one consecutive 6-bit payload = two signed Q3 values.
 //
 // pair_index 0..31 addresses the 32 pairs in one 24-byte G64 group.
+template <bool UsePrmt = false>
 __device__ __forceinline__
 unsigned q3_small_t_bf16_pair(
     const std::uint8_t* __restrict__ group_codes,
@@ -84,6 +86,16 @@ unsigned q3_small_t_bf16_pair(
             static_cast<unsigned>(shift))
         & 0x3fu;
 
+    if constexpr (UsePrmt) {
+        const unsigned index = (packed & 7u) | ((packed & 0x38u) << 1);
+        unsigned selectors, result;
+        // All selector nibbles are <8; both lookups preserve exact BF16 bits,
+        // including positive zero. No floating-point math order changes.
+        asm("prmt.b32 %0, 0x22203100, 0x51404241, %1;" : "=r"(selectors) : "r"(index));
+        asm("prmt.b32 %0, 0x3f408000, 0x0000bfc0, %1;" : "=r"(result) : "r"(selectors));
+        return result;
+    }
+
     const int raw0 =
         static_cast<int>(packed & 0x7u);
 
@@ -109,12 +121,25 @@ unsigned q3_small_t_bf16_pair(
 }
 
 
+template <class Geometry, int TileCols, int ActiveCols, int CodeRowPaddingBytes>
+inline constexpr bool kQ3SmallTCompositionLutAdmitted = [] {
+        if constexpr (requires { Geometry::kUseCompositionLutT4; }) {
+            return Geometry::kUseCompositionLutT4 && TileCols == 8
+                && ActiveCols == 4 && CodeRowPaddingBytes == 16;
+        } else {
+            return false;
+        }
+    }();
+
 template <
     class Geometry,
     int TileCols,
     int ActiveCols,
     class Epilogue,
-    class RowPolicy>
+    class RowPolicy,
+    int CodeRowPaddingBytes = 16,
+    bool UsePrmt = kQ3SmallTCompositionLutAdmitted<Geometry, TileCols, ActiveCols,
+                                                CodeRowPaddingBytes>>
 __launch_bounds__(256, 4)
 __global__ void q3_small_t_mma_kernel(
     const __nv_bfloat16* __restrict__ x,
@@ -172,26 +197,21 @@ __global__ void q3_small_t_mma_kernel(
     static_assert(
         RowPolicy::kOutputRowsPerCta
         <= kRowsPerCta);
+    static_assert(CodeRowPaddingBytes == 0 || CodeRowPaddingBytes == 16);
 
+
+    struct StageStorage {
+        // Eight consecutive Q3 G64 groups for each logical row.
+        // Padding preserves 16B asynchronous-copy alignment and spreads
+        // distinct row words across shared banks. Zero is test-only.
+        std::uint8_t codes[kRowsPerCta][kCodeBytesPerOuter + CodeRowPaddingBytes];
+        __nv_bfloat16 activations[kWarps][kTileCols * kTileK];
+        std::uint16_t scales[kRowsPerCta][kWarps];
+    };
 
     union SharedStorage {
 
-        struct {
-
-            // Eight consecutive Q3 G64 groups for each logical row.
-            std::uint8_t
-                codes[kRowsPerCta]
-                     [kCodeBytesPerOuter];
-
-            __nv_bfloat16
-                activations[kWarps]
-                           [kTileCols * kTileK];
-
-            std::uint16_t
-                scales[kRowsPerCta]
-                      [kWarps];
-
-        } staging;
+        StageStorage staging[2];
 
         float partial[
             kWarps
@@ -203,16 +223,6 @@ __global__ void q3_small_t_mma_kernel(
 
     __shared__ __align__(16)
         SharedStorage shared;
-
-    auto& code_shared =
-        shared.staging.codes;
-
-    auto& x_shared =
-        shared.staging.activations;
-
-    auto& scale_shared =
-        shared.staging.scales;
-
 
     const int tid =
         static_cast<int>(threadIdx.x);
@@ -244,7 +254,7 @@ __global__ void q3_small_t_mma_kernel(
     // means four real token rows are loaded even though MMA has N=8.
     // -------------------------------------------------------------------------
     const auto stage_x =
-        [&](int outer_k0) {
+        [&](StageStorage& stage, int outer_k0) {
 
             constexpr int kItemsPerSplit =
                 ActiveCols * (kTileK / 8);
@@ -261,7 +271,7 @@ __global__ void q3_small_t_mma_kernel(
                     - col * (kTileK / 8);
 
                 auto* dst =
-                    &x_shared[warp][
+                    &stage.activations[warp][
                         col * kTileK
                         + q3_small_t_swizzle_64(
                             col,
@@ -287,7 +297,7 @@ __global__ void q3_small_t_mma_kernel(
     //     8 * 24 = 192 bytes / logical row.
     // -------------------------------------------------------------------------
     const auto stage_weight =
-        [&](int outer_k0) {
+        [&](StageStorage& stage, int outer_k0) {
 
             const int base_group =
                 outer_k0 / 64;
@@ -313,7 +323,7 @@ __global__ void q3_small_t_mma_kernel(
                      chunk += 32) {
 
                     cp_async<16, Schedule::kCodeCache>(
-                        &code_shared[row][chunk * 16],
+                        &stage.codes[row][chunk * 16],
                         codes
                             + static_cast<std::int64_t>(
                                 weight_row)
@@ -338,7 +348,7 @@ __global__ void q3_small_t_mma_kernel(
                         row);
 
                 cp_async<16>(
-                    &scale_shared[row][0],
+                    &stage.scales[row][0],
                     scales
                         + (
                             static_cast<std::int64_t>(
@@ -359,8 +369,8 @@ __global__ void q3_small_t_mma_kernel(
     float acc[kNt][4] = {};
 
 
-    stage_weight(0);
-    stage_x(0);
+    stage_weight(shared.staging[0], 0);
+    stage_x(shared.staging[0], 0);
 
     cp_commit();
     cp_wait<0>();
@@ -375,6 +385,22 @@ __global__ void q3_small_t_mma_kernel(
 
         const int outer_k0 =
             outer * kGroupK;
+
+        // The previous boundary barrier retired every reader of this buffer.
+        // Stage the next K tile into the other buffer before computing this one.
+        // Each thread waits for its own copies at the boundary; the CTA barrier
+        // then publishes all loader-warps' weight rows to all compute warps.
+        if (outer + 1 < kOuterGroups) {
+            auto& next_stage = shared.staging[(outer + 1) & 1];
+            stage_weight(next_stage, outer_k0 + kGroupK);
+            stage_x(next_stage, outer_k0 + kGroupK);
+            cp_commit();
+        }
+
+        auto& stage = shared.staging[outer & 1];
+        auto& code_shared = stage.codes;
+        auto& x_shared = stage.activations;
+        auto& scale_shared = stage.scales;
 
         float group_acc[kNt][4] = {};
 
@@ -405,22 +431,22 @@ __global__ void q3_small_t_mma_kernel(
 
 
             const unsigned af0 =
-                q3_small_t_bf16_pair(
+                q3_small_t_bf16_pair<UsePrmt>(
                     top_group,
                     pair0);
 
             const unsigned af1 =
-                q3_small_t_bf16_pair(
+                q3_small_t_bf16_pair<UsePrmt>(
                     bot_group,
                     pair0);
 
             const unsigned af2 =
-                q3_small_t_bf16_pair(
+                q3_small_t_bf16_pair<UsePrmt>(
                     top_group,
                     pair1);
 
             const unsigned af3 =
-                q3_small_t_bf16_pair(
+                q3_small_t_bf16_pair<UsePrmt>(
                     bot_group,
                     pair1);
 
@@ -507,20 +533,7 @@ __global__ void q3_small_t_mma_kernel(
 
 
         if (outer + 1 < kOuterGroups) {
-
-            __syncthreads();
-
-            stage_weight(
-                outer_k0
-                    + kGroupK);
-
-            stage_x(
-                outer_k0
-                    + kGroupK);
-
-            cp_commit();
             cp_wait<0>();
-
             __syncthreads();
         }
     }

@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ninfer/ops/speculative_round.h"
 #include "ops/op_tester.h"
 
@@ -157,6 +158,7 @@ TargetDistribution sparse_target_distribution(const std::vector<std::uint16_t>& 
                                               const std::vector<std::int32_t>& drafts) {
     const auto adjusted = [&](int token) {
         double value = bf16_to_f32(logits[sparse_logit_index(row, column, token)]);
+        if (!(config.temperature > 0.0f)) return value;
         int count    = token_counts[static_cast<std::size_t>(row) * kSparseTokenDomain + token];
         for (int previous = 0; previous < column; ++previous) {
             if (drafts[static_cast<std::size_t>(row) * kSparseDrafts + previous] == token) {
@@ -545,7 +547,8 @@ int sparse_general_mixed_case() {
         }
     }
 
-    // A committed-history penalty changes row 0's first target argmax.
+    // Greedy ignores penalties: raw logits 5>4 select 1000 despite its presence count.
+    // Row 0 therefore licenses [1000,1016,200002], A=2, count=3, length=4003.
     configs[0].temperature                       = 0.0f;
     configs[0].presence_penalty                  = 2.0f;
     const int row0_draft                         = drafts[0];
@@ -929,6 +932,9 @@ int main() {
     failures += greedy_accept_case(5, 2);
     failures += greedy_accept_case(5, 5);
     failures += greedy_accept_case(15, 7, 257);
+    // The registered Qwen vocabulary uses the multiblock route. Greedy acceptance
+    // must leave a non-null token-count array unchanged on this route as well.
+    failures += greedy_accept_case(5, 2, kSparseTokenDomain);
     failures += deterministic_sampling_case();
     failures += batched_sampling_workspace_stride_case();
     failures += sparse_greedy_direct_case();

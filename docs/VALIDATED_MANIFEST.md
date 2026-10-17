@@ -1,3 +1,5 @@
+> Record from [toddballinger/ninfer-5080](https://github.com/toddballinger/ninfer-5080). The [project README](../README.md) describes the laptop implementation.
+
 # Validated Release Manifest
 
 This file records immutable and subsequently validated milestones by exact commit, binary and artifact identity. Validation claims are attached to the source tree that was actually tested rather than to a floating branch label.

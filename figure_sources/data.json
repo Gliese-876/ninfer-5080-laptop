@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "metric": "ninfer_bench sustained decode",
+  "units": "tokens per second",
+  "aggregation": "arithmetic mean of two per-run rates: 2048/decode_seconds",
+  "settings": {
+    "prompt_tokens": 118001,
+    "decode_tokens": 2048,
+    "generated_output_tokens": 2049,
+    "warmup": 1,
+    "measured_repetitions": 2,
+    "max_context": 131072,
+    "kv_capacity": 131072,
+    "kv_dtype": "q4-group64",
+    "prefill_chunk": 1792,
+    "cuda_graph": true,
+    "embedding_host": true,
+    "concurrency": 1,
+    "sampling_temperature": 0,
+    "prefix_reuse": false,
+    "model_default_stops_enabled": false,
+    "vision_enabled_in_benchmark": false
+  },
+  "artifact": {
+    "model_sha256": "c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21",
+    "main_model_bpw": 3.952986229319856,
+    "corpus_sha256": "5b08da2c7b7ea5cafad2fab5699dccbcbce86040d8a37219b8c21f094d1d1eb7",
+    "corpus_repository_path": "bench/fixtures/workflow-118k-v1/ninfer_bench_118001.ids"
+  },
+  "laptop_configuration": {
+    "gpu": "RTX 5080 Laptop GPU",
+    "vram_gb": 16,
+    "maximum_gpu_power_w": 175,
+    "ram_gb": 32,
+    "operating_system": "Windows 11 + WSL2",
+    "cuda_toolchain": "13.4.92",
+    "nvidia_driver": "592.27"
+  },
+  "bars": [
+    {
+      "id": "desktop_original",
+      "hardware_label": "RTX 5080 Desktop",
+      "configuration_label": "ninfer-5080 v1.5 · MTP-3",
+      "tokens_per_second": 112.215,
+      "measurement_origin": "Published in the toddballinger/ninfer-5080 v1.5 release",
+      "mtp_draft_tokens": 3,
+      "prefill_tok_s_mean": 1374.383,
+      "source_url": "https://github.com/toddballinger/ninfer-5080/releases/tag/qwen3.8-27b-rtx5080-128k-vision-v1.5",
+      "source_metric": "Headline result: Sustained decode",
+      "source_commit": "e4edd6d5c5f9f7996de0f3d9f6c311e883452580"
+    },
+    {
+      "id": "laptop_baseline",
+      "hardware_label": "RTX 5080 Laptop",
+      "configuration_label": "Baseline · MTP-3",
+      "tokens_per_second": 67.84500675428085,
+      "measurement_origin": "measured locally on the same laptop",
+      "mtp_draft_tokens": 3,
+      "proposal_head": "full",
+      "decode_seconds_per_run": [
+        30.16629127,
+        30.20663852
+      ],
+      "decode_tokens_per_run": [
+        2048,
+        2048
+      ],
+      "decode_tok_s_per_run": [
+        67.89034759591779,
+        67.7996659126439
+      ],
+      "decode_tok_s_sample_stddev": 0.06412162999,
+      "prefill_tok_s_mean": 870.6652059,
+      "prefill_seconds_per_run": [
+        134.7720443,
+        136.2959362
+      ],
+      "speculative": {
+        "enabled": true,
+        "draft_window": 3,
+        "rounds": 1178,
+        "drafted_tokens": 3534,
+        "accepted_tokens": 2918,
+        "fallback_steps": 0,
+        "acceptance_rate": 0.8256932654,
+        "acceptance_length": 3.477079796,
+        "accepted_per_position": [
+          1078,
+          972,
+          868
+        ]
+      },
+      "binary_sha256": "0f291e95301d65140ce069f0328a720a29859decb6cd4fac8d9c47bed54d1581",
+      "measured_window_seconds": 509.89307271300004,
+      "benchmark_started_utc": "2026-10-17T02:04:06.103895+00:00",
+      "benchmark_finished_utc": "2026-10-17T02:12:35.996968+00:00",
+      "source_metric": "/tests/0/decode_output_tok_s_mean",
+      "benchmark_report_sha256": "ad68cd930202b4a88d52a7ea2436a645736d06987b32907be4b1c79a53c547fd"
+    },
+    {
+      "id": "laptop_optimized",
+      "hardware_label": "RTX 5080 Laptop",
+      "configuration_label": "Optimized · MTP-4",
+      "tokens_per_second": 94.2953740155222,
+      "measurement_origin": "measured locally on the same laptop",
+      "mtp_draft_tokens": 4,
+      "proposal_head": "optimized",
+      "decode_seconds_per_run": [
+        21.73010006,
+        21.70788525
+      ],
+      "decode_tokens_per_run": [
+        2048,
+        2048
+      ],
+      "decode_tok_s_per_run": [
+        94.24715000599035,
+        94.34359802505405
+      ],
+      "decode_tok_s_sample_stddev": 0.06819903912,
+      "prefill_tok_s_mean": 948.7896364,
+      "prefill_seconds_per_run": [
+        124.1516051,
+        124.5892343
+      ],
+      "speculative": {
+        "enabled": true,
+        "draft_window": 4,
+        "rounds": 1044,
+        "drafted_tokens": 4170,
+        "accepted_tokens": 3052,
+        "fallback_steps": 0,
+        "acceptance_rate": 0.7318944844,
+        "acceptance_length": 3.923371648,
+        "accepted_per_position": [
+          922,
+          788,
+          728,
+          614
+        ]
+      },
+      "binary_sha256": "352391ce63f0f9c802a8bed12ead1a6fdd317b35cab69b42bd8aa2daf09cf92f",
+      "measured_window_seconds": 451.436970118,
+      "benchmark_started_utc": "2026-10-17T02:13:44.372928+00:00",
+      "benchmark_finished_utc": "2026-10-17T02:21:15.809898+00:00",
+      "source_metric": "/tests/0/decode_output_tok_s_mean",
+      "benchmark_report_sha256": "a3946f09f753895e27eb02d62944e4745d92e0443b2eef87a54a3c653ddcffd0"
+    }
+  ],
+  "laptop_gain_percent": 38.98646123957001,
+  "interpretation": [
+    "Reference data: https://github.com/toddballinger/ninfer-5080/releases/tag/qwen3.8-27b-rtx5080-128k-vision-v1.5",
+    "The laptop configurations share hardware, model weights, corpus, decode length, context/KV capacity, KV format and rate aggregation.",
+    "The baseline uses MTP-3 with the full proposal head; the optimized configuration uses MTP-4 with the indexed proposal head.",
+    "Engine decode time includes proposal, verification, KV operations and state commitment.",
+    "The fixed-length workload generates 2048 timed tokens with model-default stopping disabled."
+  ],
+  "operating_conditions": {
+    "schema_version": 1,
+    "power_query_field": "enforced.power.limit",
+    "sample_period_seconds": 2,
+    "scope": "Each complete benchmark process, including startup, one full warmup and two measured repetitions",
+    "runs": {
+      "morning-baseline": {
+        "benchmark_started_utc": "2026-10-17T02:04:06.103895+00:00",
+        "benchmark_finished_utc": "2026-10-17T02:12:35.996968+00:00",
+        "external_ac_before": 1,
+        "external_ac_after": 1,
+        "sample_count": 255,
+        "statistics": {
+          "power_limit_w": {
+            "min": 175.0,
+            "median": 175.0,
+            "max": 175.0
+          },
+          "power_draw_w": {
+            "min": 9.46,
+            "median": 172.85,
+            "max": 174.92
+          },
+          "temperature_gpu_c": {
+            "min": 48.0,
+            "median": 84.0,
+            "max": 88.0
+          }
+        },
+        "thermal_limit_active_samples": 88
+      },
+      "morning-optimized": {
+        "benchmark_started_utc": "2026-10-17T02:13:44.372928+00:00",
+        "benchmark_finished_utc": "2026-10-17T02:21:15.809898+00:00",
+        "external_ac_before": 1,
+        "external_ac_after": 1,
+        "sample_count": 226,
+        "statistics": {
+          "power_limit_w": {
+            "min": 175.0,
+            "median": 175.0,
+            "max": 175.0
+          },
+          "power_draw_w": {
+            "min": 8.61,
+            "median": 165.58499999999998,
+            "max": 174.76
+          },
+          "temperature_gpu_c": {
+            "min": 56.0,
+            "median": 86.0,
+            "max": 89.0
+          }
+        },
+        "thermal_limit_active_samples": 135
+      }
+    }
+  },
+  "source_repository_url": "https://github.com/toddballinger/ninfer-5080"
+}

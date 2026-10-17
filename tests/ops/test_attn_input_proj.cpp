@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ninfer/ops/attn_input_proj.h"
 
 #include "ops/direct_bf16_weight.h"
@@ -6,6 +7,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -203,16 +205,77 @@ int run_q4_q5_case(DevicePackedWeight& query_key, DevicePackedWeight& gate_value
     ops::attn_input_proj(x, query_key.view(), gate_value.view(), q, g, k, v, nullptr);
     cuda_synchronize();
 
-    const std::string suffix = " Q4/Q5 A16 T=" + std::to_string(tokens);
+    const std::string suffix = (gate_value.host.weight.qtype == QType::Q4G64_F16S
+                                   ? " Q4/Q4 A16 T=" : " Q4/Q5 A16 T=") +
+                               std::to_string(tokens);
     int failures             = 0;
-    failures += verify_output("attn q" + suffix, query, query_key.host, 0, kQRows, activation,
-                              kHidden, tokens);
-    failures += verify_output("attn k" + suffix, key, query_key.host, kQRows, kKvRows, activation,
-                              kHidden, tokens);
-    failures += verify_output("attn gate" + suffix, gate, gate_value.host, 0, kQRows, activation,
-                              kHidden, tokens);
-    failures += verify_output("attn value" + suffix, value, gate_value.host, kQRows, kKvRows,
-                              activation, kHidden, tokens);
+    if (tokens == 5 || tokens == 6) {
+        // Evaluate every row and every represented BF16 token through the same
+        // independent signed-code/FP16-scale FP64 oracle, including both seams.
+        const std::array<std::vector<double>, 4> reference{
+            projection_oracle(query_key.host, 0, kQRows, activation, kHidden, tokens, kQRows),
+            projection_oracle(gate_value.host, 0, kQRows, activation, kHidden, tokens, kQRows),
+            projection_oracle(query_key.host, kQRows, kKvRows, activation, kHidden, tokens, kKvRows),
+            projection_oracle(gate_value.host, kQRows, kKvRows, activation, kHidden, tokens, kKvRows),
+        };
+        const std::array<GuardedBf16Tensor*, 4> output{&query, &gate, &key, &value};
+        constexpr std::array<std::int32_t, 4> rows{kQRows, kQRows, kKvRows, kKvRows};
+        constexpr std::array<const char*, 4> names{"q", "gate", "k", "value"};
+        const auto verify_complete = [&](const char* execution) {
+            int errors = 0;
+            for (std::size_t index = 0; index < output.size(); ++index) {
+                const std::string label = "attn " + std::string(names[index]) + suffix + execution;
+                errors += output[index]->verify_guards(label);
+                errors += output[index]->verify_fully_written(label);
+                const auto actual = gather_rows(output[index]->values(), rows[index], 0,
+                                                rows[index], tokens, rows[index]);
+                errors += compare(label, actual, reference[index], kAttnInputProjA16Tolerance);
+            }
+            return errors;
+        };
+        failures += verify_complete(" eager full FP64");
+        const std::array<std::vector<std::uint16_t>, 4> eager{
+            query.bits(), gate.bits(), key.bits(), value.bits()};
+
+        cudaStream_t stream = nullptr;
+        cudaGraph_t graph = nullptr;
+        cudaGraphExec_t execution = nullptr;
+        cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "attn graph stream");
+        cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal),
+                   "attn begin graph capture");
+        ops::attn_input_proj(x, query_key.view(), gate_value.view(), q, g, k, v, stream);
+        cuda_check(cudaStreamEndCapture(stream, &graph), "attn end graph capture");
+        cuda_check(cudaGraphInstantiate(&execution, graph, 0), "attn instantiate graph");
+        for (int replay = 0; replay < 2; ++replay) {
+            for (std::size_t index = 0; index < output.size(); ++index) {
+                cuda_check(cudaMemsetAsync(output[index]->data(), 0xff,
+                                           static_cast<std::size_t>(rows[index]) * tokens * 2,
+                                           stream), "attn poison graph output");
+            }
+            cuda_check(cudaGraphLaunch(execution, stream), "attn graph replay");
+            cuda_check(cudaStreamSynchronize(stream), "attn synchronize graph");
+            failures += verify_complete(" graph full FP64");
+            for (std::size_t index = 0; index < output.size(); ++index) {
+                failures += verify_exact(("attn graph BF16 parity " +
+                                           std::string(names[index]) + suffix).c_str(),
+                                          output[index]->bits(), eager[index]);
+            }
+        }
+        cuda_check(cudaGraphExecDestroy(execution), "attn destroy graph execution");
+        cuda_check(cudaGraphDestroy(graph), "attn destroy graph");
+        cuda_check(cudaStreamDestroy(stream), "attn destroy graph stream");
+        std::cout << (failures == 0 ? "OK" : "FAIL") << " attn full FP64 + Graph" << suffix
+                  << '\n';
+    } else {
+        failures += verify_output("attn q" + suffix, query, query_key.host, 0, kQRows, activation,
+                                  kHidden, tokens);
+        failures += verify_output("attn k" + suffix, key, query_key.host, kQRows, kKvRows, activation,
+                                  kHidden, tokens);
+        failures += verify_output("attn gate" + suffix, gate, gate_value.host, 0, kQRows, activation,
+                                  kHidden, tokens);
+        failures += verify_output("attn value" + suffix, value, gate_value.host, kQRows, kKvRows,
+                                  activation, kHidden, tokens);
+    }
     failures += verify_preserved("attn x" + suffix, device_activation, activation_bits);
     failures += query_key.verify_preserved("attn query/key" + suffix);
     failures += gate_value.verify_preserved("attn gate/value" + suffix);
@@ -426,7 +489,7 @@ int run_q4_q5() {
     //
     // Also retain representative production-width cases.
     for (const std::int32_t tokens : {
-             1, 2,
+             1, 2, 5,
              6, 7, 8, 9,
              12, 13,
              16, 17, 20, 21,
@@ -442,11 +505,11 @@ int run_q4_q5() {
     // Preserve the fork-specific Q4/Q4 regression coverage separately.
     // These cases must continue to bypass the new Q4/Q5 grouped routes.
     for (const std::int32_t tokens : {
-             1, 2, 16, 17, 21, 48, 129, 321, 621, 896}) {
+             1, 2, 4, 5, 6, 7, 8, 16, 17, 21, 48, 129, 321, 621, 896}) {
         failures += run_q4_q5_case(query_key, gate_value_q4, tokens);
     }
 
-    for (const std::int32_t tokens : {17, 129, 621, 896}) {
+    for (const std::int32_t tokens : {5, 6, 17, 129, 621, 896}) {
         failures += run_q4_q4_strided_output_case(tokens);
     }
 

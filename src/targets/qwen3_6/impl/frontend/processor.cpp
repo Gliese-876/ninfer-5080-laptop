@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "targets/qwen3_6/impl/frontend/processor.h"
 
 #include "media/decode/decode.h"
@@ -587,14 +588,18 @@ std::span<const std::int32_t> ProcessedInput::position_axis(int axis) const {
         static_cast<std::size_t>(axis) * input_ids.size(), input_ids.size());
 }
 
-EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat& rendered) {
+EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat& rendered,
+                                bool cache_text_runs) {
     EncodedChat encoded;
-    encoded.input_ids = tokenizer.encode(rendered.text);
+    const auto encode = [&](std::string_view text) {
+        return cache_text_runs ? tokenizer.encode_cached(text) : tokenizer.encode(text);
+    };
+    encoded.input_ids = encode(rendered.text);
     if (!rendered.rewrite_checkpoint) { return encoded; }
     if (rendered.rewrite_checkpoint->offset > rendered.text.size()) {
         throw std::logic_error("rewrite checkpoint byte offset exceeds rendered chat");
     }
-    const std::vector<int> prefix = tokenizer.encode(
+    const std::vector<int> prefix = encode(
         std::string_view(rendered.text).substr(0, rendered.rewrite_checkpoint->offset));
     if (prefix.empty() || prefix.size() > encoded.input_ids.size() ||
         !std::equal(prefix.begin(), prefix.end(), encoded.input_ids.begin())) {

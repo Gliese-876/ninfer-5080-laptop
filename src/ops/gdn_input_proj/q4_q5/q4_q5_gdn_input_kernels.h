@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include "core/tensor.h"
@@ -18,6 +19,7 @@ void q4_q5_gdn_input_independent_launch(const Tensor& x, const Weight& qk_weight
                                         Tensor& z, cudaStream_t stream);
 
 void q4_q5_gdn_input_independent_prewarm();
+void q4_q5_gdn_input_conv_t5_mma_prewarm();
 
 void q4_q5_gdn_input_grouped_mma_launch(
     const Tensor& x, const Weight& qk_weight,

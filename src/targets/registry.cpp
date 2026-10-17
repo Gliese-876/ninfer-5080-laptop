@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "targets/registry.h"
 
 #include "artifact/binder.h"
@@ -12,6 +13,7 @@
 #include "ops/linear/q5/q5_launch.h"
 #include "ops/common/int8_proj_launch.h"
 #include "ops/linear/q4/q4_launch.h"
+#include "ops/linear_swiglu/q3/q3_linear_swiglu.h"
 #include "runtime/engine/kv_capacity.h"
 
 #include <chrono>
@@ -156,6 +158,10 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
         device.synchronize();
         mem_diag("after q4q5 gdn");
 
+        ops::detail::q4_q5_gdn_input_conv_t5_mma_prewarm();
+        device.synchronize();
+        mem_diag("after q5 t5 conv mma");
+
         ops::detail::speculative_round_prewarm();
         device.synchronize();
         mem_diag("after speculative");
@@ -167,6 +173,20 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
         ops::detail::q4_small_t_mma_prewarm();
         device.synchronize();
         mem_diag("after q4 small-t linear");
+
+        if (identity.weights_id == "groupwise-int-5080") {
+            ops::detail::q3_small_t_mma_prewarm();
+            device.synchronize();
+            mem_diag("after q3 small-t swiglu");
+        }
+
+        if (identity.weights_id == "groupwise-int-5080" &&
+            options.speculative.backend == SpeculativeBackend::Mtp &&
+            options.speculative.proposal_head == ProposalHead::Optimized) {
+            ops::detail::q4_gather_rows_prewarm();
+            device.synchronize();
+            mem_diag("after q4 indexed proposal");
+        }
 
         ops::detail::q5_rowsplit_mma_prewarm();
         device.synchronize();

@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ops/linear_swiglu/q3/q3_linear_swiglu.h"
 
 #include "core/device.h"
@@ -727,13 +728,15 @@ void q3_linear_swiglu_small_t_pair_launch(
 
 
 // -----------------------------------------------------------------------------
-// Q3 exact small-T BF16 Tensor-Core POC.
-//
-// Stage A intentionally mirrors Q4's proven exact-small-T schedule.
-// For the first experiment only T=4 is dispatched here.
+// Q3 exact small-T BF16 Tensor-Core paths.
+// Active columns share one eight-column MMA and one complete weight pass.
 // -----------------------------------------------------------------------------
 
 struct Q3SwiGluSmallTGeometry {
+    // Operator screening admits the exact composition codec only for T4.
+    static constexpr bool kUseCompositionLutT4 =
+        kK == 5120 && kIntermediate == 17408;
+
     static constexpr int kInputRows =
         kK;
 
@@ -888,6 +891,35 @@ void q3_linear_swiglu_t4_mma_launch(
             Q3SwiGluSmallTRows{});
 
     CUDA_CHECK(cudaGetLastError());
+}
+
+template <int ActiveCols>
+void q3_linear_swiglu_t5_8_mma_launch(const Tensor& x, const Weight& w, Tensor& out,
+                                    cudaStream_t stream) {
+    static_assert(ActiveCols >= 5 && ActiveCols <= 8);
+    if (x.ne[1] != ActiveCols) {
+        throw std::invalid_argument("Q3 small-T MMA: token extent mismatch");
+    }
+
+    constexpr int kBlocks = kIntermediate / Q3SwiGluSmallTRows::kOutputRowsPerCta;
+    const Q3SwiGluSmallTEpilogue epilogue{static_cast<__nv_bfloat16*>(out.data)};
+    q3_small_t_mma_kernel<Q3SwiGluSmallTGeometry, 8, ActiveCols,
+                          Q3SwiGluSmallTEpilogue, Q3SwiGluSmallTRows>
+        <<<kBlocks, Q3SmallTMmaSchedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(w.qdata),
+            static_cast<const std::uint8_t*>(w.scales),
+            static_cast<__nv_bfloat16*>(out.data), epilogue, Q3SwiGluSmallTRows{});
+    CUDA_CHECK(cudaGetLastError());
+}
+
+template <int ActiveCols>
+void q3_small_t_mma_prewarm_exact() {
+    cudaFuncAttributes attributes{};
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attributes,
+        q3_small_t_mma_kernel<Q3SwiGluSmallTGeometry, 8, ActiveCols,
+                              Q3SwiGluSmallTEpilogue, Q3SwiGluSmallTRows>));
 }
 
 
@@ -1681,6 +1713,17 @@ void q3_linear_swiglu_int8_launch(
 
 } // namespace
 
+void q3_small_t_mma_prewarm() {
+    // Include every registered small-T MMA specialization in startup residency
+    // before the target finalizes the shared KV/runtime capacity.
+    q3_small_t_mma_prewarm_exact<2>();
+    q3_small_t_mma_prewarm_exact<4>();
+    q3_small_t_mma_prewarm_exact<5>();
+    q3_small_t_mma_prewarm_exact<6>();
+    q3_small_t_mma_prewarm_exact<7>();
+    q3_small_t_mma_prewarm_exact<8>();
+}
+
 std::size_t q3_linear_swiglu_workspace_capacity_bytes(
     std::int32_t gate_up_rows,
     std::int32_t input_rows,
@@ -1761,8 +1804,7 @@ void q3_linear_swiglu_dispatch(
         ++q3_calls_t257_plus;
     }
 
-    // Fast decode path. Keep original known-correct implementation
-    // unchanged for T >= 2.
+    // Preserve the existing T1..4 instances and their arithmetic.
     if (tokens == 1) {
         q3_linear_swiglu_gemv_pair_launch(x, w, out, stream);
         return;
@@ -1784,6 +1826,25 @@ void q3_linear_swiglu_dispatch(
         q3_linear_swiglu_t4_mma_launch(
             x, w, out, stream);
         return;
+    }
+
+    // T5..8 use the already allocated eight MMA columns in one weight pass.
+    // Larger A16 extents keep their established tile/tail decomposition.
+    switch (tokens) {
+    case 5:
+        q3_linear_swiglu_t5_8_mma_launch<5>(x, w, out, stream);
+        return;
+    case 6:
+        q3_linear_swiglu_t5_8_mma_launch<6>(x, w, out, stream);
+        return;
+    case 7:
+        q3_linear_swiglu_t5_8_mma_launch<7>(x, w, out, stream);
+        return;
+    case 8:
+        q3_linear_swiglu_t5_8_mma_launch<8>(x, w, out, stream);
+        return;
+    default:
+        break;
     }
 
     // AllowA8 changes only large prefill.

@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/program.h"
 
@@ -3285,7 +3286,6 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                    draft_window, envelopes, executable);
         device.synchronize();
 
-        const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence       = sequences[lanes[row]];
             RequestControl& request       = requests[lanes[row]];
@@ -3436,7 +3436,12 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                 .produced      = static_cast<std::uint32_t>(count_i),
             };
             request.lifecycle = Lifecycle::Pending;
-            request.timings.decode_seconds += seconds;
+        }
+        // Forced-token MTP bridges run after the main transaction synchronization.
+        // Charge the full batch only after every bridge and row update completes.
+        const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
+        for (const std::uint32_t lane : lanes) {
+            requests[lane].timings.decode_seconds += seconds;
         }
         return runtime::BatchedGeneratedRound{
             .tokens     = std::span<const TokenId>(mtp_host_egress->licensed_tokens.data(),

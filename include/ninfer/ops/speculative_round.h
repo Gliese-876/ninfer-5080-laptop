@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include "core/tensor.h"
@@ -111,8 +112,8 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  * Algorithm:
  *   This is the seven-draft, 16-candidate sparse-proposal form of speculative rejection sampling.
  *   For row b, only target columns 0..P are live, where P=current_extents[b]. Greedy rows accept
- *   the longest draft prefix matching the penalty-adjusted target argmax and then emit that argmax
- *   as correction/bonus. Positive-temperature rows build the target distribution p with the
+ *   the longest draft prefix matching the raw target argmax, ignoring penalties, and then emit
+ *   that argmax as correction/bonus. Positive-temperature rows build the target distribution p using
  *   sampling.h penalty/filter semantics, accept draft d at each live draft column with probability
  *   min(1,p(d)/q(d)), and on first rejection sample from normalized max(p-q,0). If all P drafts are
  *   accepted, the final token is sampled from target column P.

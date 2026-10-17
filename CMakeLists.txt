@@ -1,3 +1,4 @@
+# Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 cmake_minimum_required(VERSION 3.28)
 
 # The current implementation is compiled only for sm_120a. Set and validate the
@@ -33,9 +34,9 @@ if(CMAKE_GENERATOR MATCHES "Ninja")
   set(CMAKE_JOB_POOL_LINK cuda_link)
 endif()
 
-if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.1)
+if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.4)
   message(FATAL_ERROR
-    "NInfer requires CUDA 13.1 or newer; found CUDA compiler "
+    "NInfer requires CUDA 13.4 or newer for native signed-Q4 ldmatrix; found CUDA compiler "
     "${CMAKE_CUDA_COMPILER_VERSION}")
 endif()
 

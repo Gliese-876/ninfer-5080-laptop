@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ninfer/ops/linear_w8_k_slice.h"
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/text_context.h"
@@ -412,7 +413,7 @@ void TextContext::bind() {
     if (weights_.optimized_proposal) {
         const auto& proposal = *weights_.optimized_proposal;
         set_proposal_head(&proposal.head, static_cast<const std::int32_t*>(proposal.token_ids.data),
-                          proposal.head.n);
+                          proposal.token_ids.ne[0], proposal.storage);
     }
 
     if (mtp_enabled()) {
@@ -697,7 +698,13 @@ void TextContext::proposal_argmax(const Tensor& hidden, Tensor& logits, Tensor& 
     require_tensor_window(logits, DType::BF16, kCfg.vocab, T, "proposal logits");
     if (proposal_head_ != nullptr) {
         Tensor proposal_logits = work_.alloc(DType::BF16, {proposal_head_n_, T});
-        ops::linear(hidden, *proposal_head_, proposal_logits, ctx_.stream);
+        if (proposal_head_storage_ == qwen3_6::ProposalHeadStorage::IndexedOutputRows) {
+            Tensor rows(const_cast<std::int32_t*>(proposal_head_ids_), DType::I32,
+                        {proposal_head_n_});
+            ops::linear_gather_rows(hidden, *proposal_head_, rows, proposal_logits, ctx_.stream);
+        } else {
+            ops::linear(hidden, *proposal_head_, proposal_logits, ctx_.stream);
+        }
         ops::argmax(proposal_logits, proposal_tokens, proposal_head_n_, ctx_.stream);
         ops::proposal_remap_token_ids(proposal_tokens, proposal_head_ids_, proposal_head_n_,
                                       ctx_.stream);

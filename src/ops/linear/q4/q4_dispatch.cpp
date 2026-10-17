@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ops/linear/q4/q4_dispatch.h"
 
 #include <stdexcept>
@@ -82,11 +83,11 @@ Q4Launch select_q4_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             return launch_q4_mma_r64_c128;
 
         // Qwen3.8-27B vocabulary projection [248320,5120].
-        // The K=5120 GEMV supports arbitrary output rows; larger T uses
-        // the generic row-split SIMT/MMA kernels.
+        // Retain GEMV and SIMT at T<4; use the existing eight-column
+        // small-T MMA layout for target verification at T=4..8.
         case 248320:
             if (t == 1) { return launch_q4_gemv_r1_w8_direct; }
-            if (t == 4) { return launch_q4_qwen38_head_t4; }
+            if (t >= 4 && t <= 8) { return launch_q4_qwen38_head_small_t; }
             if (t <= 4) { return launch_q4_simt_r8_c4; }
             if (t <= 16) { return launch_q4_simt_r8_c8; }
             return launch_q4_mma_r64_c128;
@@ -97,7 +98,8 @@ Q4Launch select_q4_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
         break;
     case 17408:
         if (n == 5120) {
-            if (t == 4) { return launch_q4_qwen38_down_t4; }
+            if (t >= 128) { return launch_q4_qwen38_prefill_vector; }
+            if (t >= 4 && t <= 8) { return launch_q4_qwen38_down_small_t; }
             // Qwen3.8-27B MLP down projection [5120,17408].
             // Generic row-split SIMT is valid for small T, including decode;
             // use MMA for larger token counts.
@@ -109,7 +111,8 @@ Q4Launch select_q4_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
 
     case 6144:
         if (n == 5120) {
-            if (t == 4) { return launch_q4_qwen38_gdn_out_t4; }
+            if (t >= 128) { return launch_q4_qwen38_prefill_vector; }
+            if (t >= 4 && t <= 8) { return launch_q4_qwen38_gdn_out_small_t; }
             // Qwen3.8-27B GDN output [5120,6144].
             // Generic SIMT handles even T=1; MMA handles larger token counts.
             if (t <= 4) { return launch_q4_simt_r8_c4; }

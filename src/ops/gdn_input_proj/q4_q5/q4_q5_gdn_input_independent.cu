@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_kernels.h"
 
 #include "core/device.h"
@@ -10,6 +11,7 @@
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemv.cuh"
 #include "ops/linear/q5/q5_rowsplit_rowblock_small_t.cuh"
+#include "ops/linear/q5/q5_small_t_mma.cuh"
 
 #include <cuda_bf16.h>
 
@@ -295,6 +297,28 @@ void launch_q4(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t 
 }
 
 
+template <class Geometry, int Tokens>
+void launch_q4_value_z_mma(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
+                           cudaStream_t stream) {
+    static_assert(Geometry::kHidden == 5120 && Geometry::kValueRows == 6144 &&
+                  Geometry::kValueZRows == 12288);
+    static_assert(Tokens == 4 || Tokens == 5);
+    if (weight.padded_shape[1] != Geometry::kHidden)
+        throw std::invalid_argument("Q4 GDN value/z MMA requires padded K == hidden");
+    using KGeometry = Q4LinearGeometry<12288, 5120>;
+    using Store = Q4KSplitStridedStore<true, 6144>;
+    const Store store{static_cast<__nv_bfloat16*>(value.data),
+                      static_cast<std::int32_t>(value.nb[1] / sizeof(__nv_bfloat16)),
+                      static_cast<__nv_bfloat16*>(z.data),
+                      static_cast<std::int32_t>(z.nb[1] / sizeof(__nv_bfloat16)), x.ne[1]};
+    q4_small_t_mma_kernel<KGeometry, 8, Tokens, Store><<<12288 / 16, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales),
+        static_cast<__nv_bfloat16*>(value.data), store, {});
+    CUDA_CHECK(cudaGetLastError());
+}
+
 template <class Geometry>
 void launch_q4_value_z(const Tensor& x, const Weight& weight,
                        Tensor& value, Tensor& z,
@@ -303,6 +327,18 @@ void launch_q4_value_z(const Tensor& x, const Weight& weight,
         launch_q4_value_z_gemv<Geometry>(
             x, weight, value, z, stream);
         return;
+    }
+
+    if constexpr (Geometry::kHidden == 5120 && Geometry::kValueRows == 6144 &&
+                  Geometry::kValueZRows == 12288) {
+        if (x.ne[1] == 4) {
+            launch_q4_value_z_mma<Geometry, 4>(x, weight, value, z, stream);
+            return;
+        }
+        if (x.ne[1] == 5) {
+            launch_q4_value_z_mma<Geometry, 5>(x, weight, value, z, stream);
+            return;
+        }
     }
 
     if (x.ne[1] <= 4) {
@@ -514,6 +550,34 @@ void launch_q5_simt_r8_c4(const Tensor& x, const Weight& weight,
 template <class Geometry>
 void launch_q5(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
                cudaStream_t stream) {
+    if constexpr (Geometry::kHidden == 5120) {
+        if (x.ne[1] == 5 || x.ne[1] == 6) {
+            const Q5SmallTStridedStore<Geometry::kValueRows> store{
+                static_cast<__nv_bfloat16*>(value.data),
+                static_cast<int>(value.nb[1] / sizeof(__nv_bfloat16)),
+                static_cast<__nv_bfloat16*>(z.data),
+                static_cast<int>(z.nb[1] / sizeof(__nv_bfloat16))};
+            if (x.ne[1] == 5) {
+                q5_small_t_mma_kernel<Geometry::kValueZRows, 5,
+                                      Q5SmallTStridedStore<Geometry::kValueRows>>
+                    <<<Geometry::kValueZRows / 16, 256, 0, stream>>>(
+                        static_cast<const __nv_bfloat16*>(x.data),
+                        static_cast<const std::uint8_t*>(weight.qdata),
+                        static_cast<const std::uint8_t*>(weight.qhigh),
+                        static_cast<const std::uint8_t*>(weight.scales), store);
+            } else {
+                q5_small_t_mma_kernel<Geometry::kValueZRows, 6,
+                                      Q5SmallTStridedStore<Geometry::kValueRows>>
+                    <<<Geometry::kValueZRows / 16, 256, 0, stream>>>(
+                        static_cast<const __nv_bfloat16*>(x.data),
+                        static_cast<const std::uint8_t*>(weight.qdata),
+                        static_cast<const std::uint8_t*>(weight.qhigh),
+                        static_cast<const std::uint8_t*>(weight.scales), store);
+            }
+            CUDA_CHECK(cudaGetLastError());
+            return;
+        }
+    }
     if (x.ne[1] == 1) {
         launch_q5_gemv<Geometry>(x, weight, value, z, stream);
         return;
@@ -558,17 +622,31 @@ void launch_t4_pdl(const Tensor& x, const Weight& qk_weight, const Weight& value
 
     // Q5 and Q4 publish disjoint row ranges. Q4 can execute while Q5 drains and joins Q5 only at
     // exit, before the following convolution/snapshot kernel becomes runnable.
-    q5_rowsplit_gemm_simt_split4_kernel<Q5RowSplitSimtSchedule, 4, Geometry::kFullSlabs,
-                                        Geometry::kHidden, true, Geometry::kValueRows,
-                                        Q5Split4StoreEpilogue, true, false>
-        <<<q5_grid, kQ5Threads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const std::uint8_t*>(value_z_weight.qdata),
-            static_cast<const std::uint8_t*>(value_z_weight.qhigh),
-            static_cast<const std::uint8_t*>(value_z_weight.scales),
-            static_cast<__nv_bfloat16*>(value.data), static_cast<__nv_bfloat16*>(z.data),
-            Geometry::kValueZRows, q5_out_ld, Geometry::kHidden, 4,
-            value_z_weight.padded_shape[1], Geometry::kFullSlabs);
+    if constexpr (Geometry::kHidden == 5120) {
+        const Q5SmallTStridedStore<Geometry::kValueRows> store{
+            static_cast<__nv_bfloat16*>(value.data), q5_out_ld,
+            static_cast<__nv_bfloat16*>(z.data),
+            static_cast<int>(z.nb[1] / sizeof(__nv_bfloat16))};
+        q5_small_t_mma_kernel<Geometry::kValueZRows, 4,
+                              Q5SmallTStridedStore<Geometry::kValueRows>, true, false>
+            <<<Geometry::kValueZRows / 16, 256, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(x.data),
+                static_cast<const std::uint8_t*>(value_z_weight.qdata),
+                static_cast<const std::uint8_t*>(value_z_weight.qhigh),
+                static_cast<const std::uint8_t*>(value_z_weight.scales), store);
+    } else {
+        q5_rowsplit_gemm_simt_split4_kernel<Q5RowSplitSimtSchedule, 4, Geometry::kFullSlabs,
+                                            Geometry::kHidden, true, Geometry::kValueRows,
+                                            Q5Split4StoreEpilogue, true, false>
+            <<<q5_grid, kQ5Threads, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(x.data),
+                static_cast<const std::uint8_t*>(value_z_weight.qdata),
+                static_cast<const std::uint8_t*>(value_z_weight.qhigh),
+                static_cast<const std::uint8_t*>(value_z_weight.scales),
+                static_cast<__nv_bfloat16*>(value.data), static_cast<__nv_bfloat16*>(z.data),
+                Geometry::kValueZRows, q5_out_ld, Geometry::kHidden, 4,
+                value_z_weight.padded_shape[1], Geometry::kFullSlabs);
+    }
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(pdl::launch_dependent(
         {q4_grid, dim3(Q4Schedule::kThreads), 0, stream},
@@ -630,6 +708,18 @@ void q4_q5_gdn_input_independent_launch(const Tensor& x, const Weight& qk_weight
 
 void q4_q5_gdn_input_independent_prewarm() {
     cudaFuncAttributes attr{};
+    using ValueZGeometry = Q4LinearGeometry<12288, 5120>;
+    using ValueZStore = Q4KSplitStridedStore<true, 6144>;
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr, q4_small_t_mma_kernel<ValueZGeometry, 8, 4, ValueZStore>));
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr, q4_small_t_mma_kernel<ValueZGeometry, 8, 5, ValueZStore>));
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr, q5_small_t_mma_kernel<12288, 4, Q5SmallTStridedStore<6144>, true, false>));
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr, q5_small_t_mma_kernel<12288, 5, Q5SmallTStridedStore<6144>>));
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr, q5_small_t_mma_kernel<12288, 6, Q5SmallTStridedStore<6144>>));
 
     // Geometry27 T=4 Q5 producer:
     // TriggerPdl=true, JoinPdl=false.

@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ninfer/ops/gdn_input_proj.h"
 
 #include "ops/input_projection_test_common.h"
@@ -53,7 +54,9 @@ int run_q4_q5_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_we
     ops::gdn_input_proj(x, query_key.view(), value_z_weight.view(), output, z_output, nullptr);
     cuda_synchronize();
 
-    const std::string suffix = " Q4/Q5 A16 T=" + std::to_string(tokens);
+    const std::string suffix =
+        std::string(value_z_weight.view().qtype == QType::Q4G64_F16S ? " Q4/Q4" : " Q4/Q5") +
+        " A16 T=" + std::to_string(tokens);
     int failures             = qkv.verify_guards("gdn qkv" + suffix);
     failures += z.verify_guards("gdn z" + suffix);
     failures += qkv.verify_fully_written("gdn qkv" + suffix);
@@ -330,16 +333,37 @@ int run_fp8() {
     return failures;
 }
 
+int run_q4_q4_small() {
+    DevicePackedWeight query_key(quantized_weight::make_patterned_weight(
+        QType::Q4G64_F16S, 4096, 5120, 1901U,
+        {quantized_weight::RowSplitScalePattern::Small, quantized_weight::RowSplitCodePattern::Hashed}));
+    DevicePackedWeight value_z(quantized_weight::make_patterned_weight(
+        QType::Q4G64_F16S, 12288, 5120, 1907U,
+        {quantized_weight::RowSplitScalePattern::Small, quantized_weight::RowSplitCodePattern::Hashed}));
+    return run_q4_q5_case(query_key, value_z, 4) + run_q4_q5_case(query_key, value_z, 5);
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    const bool q4_q4_small_only = argc == 2 && std::string(argv[1]) == "--q4-q4-small";
+    if (argc != 1 && !q4_q4_small_only) {
+        std::cerr << "Usage: " << argv[0] << " [--q4-q4-small]\n";
+        return 2;
+    }
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
 
     int failures = 0;
+    if (q4_q4_small_only) {
+        failures = run_q4_q4_small();
+        std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj Q4/Q4 T4/T5\n";
+        return failures == 0 ? 0 : 1;
+    }
     failures += run_q4_q5();
+    failures += run_q4_q4_small();
     failures += run_w8();
     failures += run_nvfp4();
     failures += run_fp8();

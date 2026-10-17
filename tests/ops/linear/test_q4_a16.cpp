@@ -1,8 +1,10 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ops/linear/linear_test_common.h"
 
 #include <array>
 #include <exception>
 #include <iostream>
+#include <string_view>
 
 namespace {
 
@@ -12,6 +14,24 @@ using namespace ninfer::test::linear;
 constexpr Invocation a16(std::int32_t t) { return {t}; }
 
 constexpr Invocation convenience(std::int32_t t) { return {t, CallForm::A16Convenience}; }
+
+int q4_qwen38_small_t_conformance() {
+    // Dense real-shape FP64 dot products reuse the original A16 criterion.
+    // T=3/9 qualify the adjacent unchanged routes; the T=6 graph is replayed
+    // with exactly negated BF16 input and checked against the same oracle.
+    constexpr std::array kInvocations{
+        a16(3), a16(4), a16(5), a16(6),
+        a16(7), a16(8), a16(9), Invocation{6, CallForm::Policy, ops::LinearPolicy::A16Only, true},
+    };
+    int failures = 0;
+    failures += run_shape("Q4_A16", ActivationCompute::A16, make_q4g64_f16s_weight,
+                          {5120, 17408, 149U, Comparison::Full, true, kInvocations});
+    failures += run_shape("Q4_A16", ActivationCompute::A16, make_q4g64_f16s_weight,
+                          {5120, 6144, 151U, Comparison::Full, true, kInvocations});
+    failures += run_shape("Q4_A16", ActivationCompute::A16, make_q4g64_f16s_weight,
+                          {248320, 5120, 157U, Comparison::Full, true, kInvocations});
+    return failures;
+}
 
 int q4_a16_conformance() {
     int failures = 0;
@@ -83,14 +103,21 @@ int q4_a16_conformance() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    const bool qwen38_only =
+        argc == 2 && std::string_view(argv[1]) == "--qwen38-small-t";
+    if (argc != 1 && !qwen38_only) {
+        std::cerr << "Usage: " << argv[0] << " [--qwen38-small-t]\n";
+        return 2;
+    }
     if (!ninfer::test::linear::cuda_available()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
 
     try {
-        const int failures = q4_a16_conformance();
+        int failures = qwen38_only ? 0 : q4_a16_conformance();
+        failures += q4_qwen38_small_t_conformance();
         std::cout << (failures == 0 ? "OK" : "FAIL") << " Q4_A16 Linear\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {

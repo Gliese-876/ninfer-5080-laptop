@@ -1,3 +1,4 @@
+# Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 function(ninfer_internal_includes target)
   target_include_directories(${target} PRIVATE
     ${PROJECT_SOURCE_DIR}/include
@@ -184,6 +185,7 @@ add_library(ninfer_ops STATIC
   ops/linear/nvfp4/nvfp4_w4a4.cu
   ops/linear/nvfp4/nvfp4_dispatch.cpp
   ops/linear/q4/q4_small_t_mma.cu
+  ops/linear/q4/q4_gather_rows.cu
   ops/linear/q4/q4_rowsplit_gemm_mma.cu
   ops/linear/q4/q4_rowsplit_gemm_simt.cu
   ops/linear/q4/q4_rowsplit_gemv.cu

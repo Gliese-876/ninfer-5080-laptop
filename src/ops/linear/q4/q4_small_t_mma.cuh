@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include "ops/common/mma.cuh"
@@ -64,8 +65,38 @@ __device__ __forceinline__ unsigned q4_small_t_bf16_pair(std::uint8_t packed) {
     return result.bits;
 }
 
+__device__ __forceinline__ void q4_small_t_ldmatrix_signed(unsigned& top, unsigned& bottom,
+                                                          const std::uint8_t* address) {
+    asm volatile("ldmatrix.sync.aligned.m8n16.x2.shared::cta.s8.s4 {%0,%1}, [%2];\n"
+                 : "=r"(top), "=r"(bottom) : "r"(smem_addr(address)));
+}
+
+__device__ __forceinline__ unsigned q4_small_t_signed_bytes_bf16_pair(unsigned bytes) {
+    Q4SmallTBf16PairBits result;
+    result.pair = __floats2bfloat162_rn(
+        static_cast<float>(static_cast<std::int8_t>(bytes)),
+        static_cast<float>(static_cast<std::int8_t>(bytes >> 8)));
+    return result.bits;
+}
+
+template <class Geometry, int TileCols, int ActiveCols, class Epilogue, class RowPolicy,
+          int CodeRowPaddingBytes>
+inline constexpr bool kQ4SmallTNativeProducerAdmitted = [] {
+    if constexpr (TileCols == 8 && ActiveCols == 5 && CodeRowPaddingBytes == 16 &&
+                  std::is_same_v<Epilogue, Q4SmallTMmaStoreEpilogue> &&
+                  std::is_same_v<RowPolicy, Q4SmallTMmaIdentityRows>) {
+        return (Geometry::kOutputRows == 5120 &&
+                (Geometry::kInputRows == 17408 || Geometry::kInputRows == 6144)) ||
+               (Geometry::kOutputRows == 248320 && Geometry::kInputRows == 5120);
+    } else {
+        return false;
+    }
+}();
+
 template <class Geometry, int TileCols, int ActiveCols, class Epilogue = Q4SmallTMmaStoreEpilogue,
-          class RowPolicy = Q4SmallTMmaIdentityRows>
+          class RowPolicy = Q4SmallTMmaIdentityRows, int CodeRowPaddingBytes = 16,
+          bool NativeProducer = kQ4SmallTNativeProducerAdmitted<
+              Geometry, TileCols, ActiveCols, Epilogue, RowPolicy, CodeRowPaddingBytes>>
 __launch_bounds__(256, 6) __global__
     void q4_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
                                const std::uint8_t* __restrict__ codes,
@@ -83,13 +114,25 @@ __launch_bounds__(256, 6) __global__
     constexpr int kTileCols     = TileCols;
     constexpr int kNt           = kTileCols / 8;
     static_assert(kTileCols >= 8 && kTileCols <= 32 && (kTileCols % 8) == 0);
-    static_assert(ActiveCols >= 2 && ActiveCols <= kTileCols && ActiveCols > kTileCols - 8);
+    static_assert(ActiveCols >= 1 && ActiveCols <= kTileCols && ActiveCols > kTileCols - 8);
+    if constexpr (ActiveCols == 1) {
+        static_assert(Geometry::kOutputRows == 131072 && kHidden == 5120);
+        static_assert(TileCols == 8 && CodeRowPaddingBytes == 16 &&
+                      std::is_same_v<Epilogue, Q4SmallTMmaStoreEpilogue>);
+    }
     static_assert((kHidden % kGroupK) == 0);
     static_assert(RowPolicy::kOutputRowsPerCta <= kRowsPerCta);
+    static_assert(CodeRowPaddingBytes == 0 || CodeRowPaddingBytes == 16);
+    // Explicit false retains the padded scalar test control. Other shapes,
+    // widths and epilogues cannot opt into this narrowly qualified route.
+    static_assert(!NativeProducer || kQ4SmallTNativeProducerAdmitted<
+        Geometry, TileCols, ActiveCols, Epilogue, RowPolicy, CodeRowPaddingBytes>);
 
     union SharedStorage {
         struct {
-            std::uint8_t codes[kRowsPerCta][kGroupK / 2];
+            // Keep 16B asynchronous copies aligned while spreading distinct
+            // row words across shared banks. Zero padding is test-only.
+            std::uint8_t codes[kRowsPerCta][kGroupK / 2 + CodeRowPaddingBytes];
             __nv_bfloat16 activations[kWarps][kTileCols * kTileK];
             std::uint16_t scales[kRowsPerCta][kWarps];
         } staging;
@@ -143,6 +186,24 @@ __launch_bounds__(256, 6) __global__
         }
     };
 
+    const auto permute_producer_codes = [&] {
+#pragma unroll
+        for (int row_item = 0; row_item < Schedule::kRowsPerLoaderWarp; ++row_item) {
+            const int row = warp * Schedule::kRowsPerLoaderWarp + row_item;
+            for (int chunk = lane; chunk < kGroupK / 32; chunk += 32) {
+                auto* address = &code_shared[row][chunk * 16];
+                uint4 reordered = load_vec<uint4>(address);
+                unsigned temporary = __byte_perm(reordered.x, reordered.y, 0x5140);
+                reordered.y = __byte_perm(reordered.x, reordered.y, 0x7362);
+                reordered.x = temporary;
+                temporary = __byte_perm(reordered.z, reordered.w, 0x5140);
+                reordered.w = __byte_perm(reordered.z, reordered.w, 0x7362);
+                reordered.z = temporary;
+                store_vec(address, reordered);
+            }
+        }
+    };
+
     const int b_rin     = lane & 7;
     const int b_koff    = ((lane >> 3) & 1) << 3;
     const int warp_koff = k_split * kTileK;
@@ -151,7 +212,14 @@ __launch_bounds__(256, 6) __global__
     stage_weight(0);
     stage_x(0);
     cp_commit();
-    cp_wait<0>();
+    if constexpr (NativeProducer) {
+        // Only the copying thread accesses its own completed 16B chunks. The
+        // compiler clobber keeps these reads after wait; no extra GPU barrier.
+        asm volatile("cp.async.wait_group 0;\n" : : : "memory");
+        permute_producer_codes();
+    } else {
+        cp_wait<0>();
+    }
     __syncthreads();
 
 #pragma unroll
@@ -162,10 +230,23 @@ __launch_bounds__(256, 6) __global__
 #pragma unroll
         for (int ks = 0; ks < 4; ++ks) {
             const int byte_col = warp_koff / 2 + ks * 8 + lid;
-            const unsigned af0 = q4_small_t_bf16_pair(code_shared[gid][byte_col]);
-            const unsigned af1 = q4_small_t_bf16_pair(code_shared[gid + 8][byte_col]);
-            const unsigned af2 = q4_small_t_bf16_pair(code_shared[gid][byte_col + 4]);
-            const unsigned af3 = q4_small_t_bf16_pair(code_shared[gid + 8][byte_col + 4]);
+            unsigned af0, af1, af2, af3;
+            if constexpr (NativeProducer) {
+                unsigned top, bottom;
+                q4_small_t_ldmatrix_signed(top, bottom,
+                    &code_shared[lane & 15][warp_koff / 2 + ks * 8]);
+                // Reordered bytes are exactly [2*lid, 2*lid+1,
+                // 8+2*lid, 9+2*lid] of the original k16 fragment.
+                af0 = q4_small_t_signed_bytes_bf16_pair(top);
+                af1 = q4_small_t_signed_bytes_bf16_pair(bottom);
+                af2 = q4_small_t_signed_bytes_bf16_pair(top >> 16);
+                af3 = q4_small_t_signed_bytes_bf16_pair(bottom >> 16);
+            } else {
+                af0 = q4_small_t_bf16_pair(code_shared[gid][byte_col]);
+                af1 = q4_small_t_bf16_pair(code_shared[gid + 8][byte_col]);
+                af2 = q4_small_t_bf16_pair(code_shared[gid][byte_col + 4]);
+                af3 = q4_small_t_bf16_pair(code_shared[gid + 8][byte_col + 4]);
+            }
 #pragma unroll
             for (int nt = 0; nt < kNt; ++nt) {
                 unsigned bf0, bf1;
@@ -193,7 +274,12 @@ __launch_bounds__(256, 6) __global__
             stage_weight(group_k0 + kGroupK);
             stage_x(group_k0 + kGroupK);
             cp_commit();
-            cp_wait<0>();
+            if constexpr (NativeProducer) {
+                asm volatile("cp.async.wait_group 0;\n" : : : "memory");
+                permute_producer_codes();
+            } else {
+                cp_wait<0>();
+            }
             __syncthreads();
         }
     }

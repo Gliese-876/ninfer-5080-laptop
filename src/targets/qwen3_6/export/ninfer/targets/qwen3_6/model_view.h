@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include <ninfer/targets/qwen3_6/startup_features.h>
@@ -52,9 +53,15 @@ struct MtpWeights {
     Tensor final_norm;
 };
 
+enum class ProposalHeadStorage {
+    Compact,
+    IndexedOutputRows,
+};
+
 struct OptimizedProposalWeights {
     Weight head;
     Tensor token_ids;
+    ProposalHeadStorage storage = ProposalHeadStorage::Compact;
 };
 
 struct DFlashLayerWeights {

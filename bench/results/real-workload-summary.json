@@ -1,0 +1,259 @@
+{
+  "schema_version": 1,
+  "scope": "real-near-128k-serving-workloads",
+  "measured_utc_date": "2026-10-16",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5080 Laptop GPU",
+    "vram_gib": 16,
+    "sm_count": 60,
+    "configured_maximum_power_w": 175,
+    "host_memory_gib": 32,
+    "host_memory_type": "DDR5"
+  },
+  "software": {
+    "host_os": "Windows 11",
+    "guest": "WSL2 Ubuntu 26.04",
+    "cuda_version": "13.4.92",
+    "nvidia_driver": "592.27",
+    "gcc_version": "15.2"
+  },
+  "model": {
+    "filename": "qwen3_8_27b.ninfer",
+    "size_bytes": 16461267456,
+    "sha256": "c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21",
+    "huggingface_repository": "ninfer-5080/Qwen3.8-27B-RTX5080",
+    "huggingface_revision": "e23a3301eed611ac3196e3389c3d572bc5ddeb9a",
+    "effective_main_model_bpw": 3.952986229319856
+  },
+  "workload": {
+    "fixture_sha256": "711458427aced8ed08def4ab13a0d9c857bf261e83f8e3e25e69924ac9b63dc2",
+    "workload_sha256": "9b61ba99c72362d4240fe20ea248fda5611b68d5c27c624558dc66353d4b2a34",
+    "categories": [
+      "Chinese reasoning",
+      "code generation",
+      "four-stage Agent tool workflow"
+    ],
+    "request_stages_per_mixed_observation": 6,
+    "actual_input_tokens_min": 124920,
+    "actual_input_tokens_max": 126559,
+    "thinking_policy": {
+      "reasoning": "native",
+      "code": "disabled",
+      "agent": "disabled"
+    }
+  },
+  "metric": {
+    "revision": "c1-postfirst-server-wall-v1",
+    "formula": "sum(max(completion_tokens - 1, 0)) / sum(server_total_seconds - server_ttft_seconds)",
+    "full_postfirst_mtp_and_state_commit_included": true,
+    "initial_mtp_preparation_phase": "TTFT",
+    "draft_proposals_counted_as_output": false
+  },
+  "common_server_config": {
+    "max_context_tokens": 131072,
+    "kv_capacity_tokens": 131072,
+    "kv_dtype": "q4_group64",
+    "prefill_chunk_tokens": 1792,
+    "cuda_graph": true,
+    "embedding_host": true,
+    "max_concurrency": 1,
+    "prefix_checkpoint_policy": "rolling-tool",
+    "preserve_thinking": true,
+    "reasoning_budget": null,
+    "vision_enabled": false
+  },
+  "long_results": [
+    {
+      "configuration": "corrected-v1.5-laptop-baseline",
+      "draft_window": 3,
+      "indexed_proposal_head": false,
+      "binary_sha256": "5d072a549181b1c600327e2fc051d79c048f34e855cebc1bfc9b41997da4e0e6",
+      "measurement_complete": true,
+      "content_checks_all_passed": true,
+      "mixed": {
+        "postfirst_tokens": 8078,
+        "postfirst_seconds": 133.98546925999997,
+        "postfirst_tok_s": 60.29011985116513,
+        "actual_input_min": 124920,
+        "actual_input_max": 126559
+      },
+      "categories": {
+        "reasoning": {
+          "postfirst_tokens": 5614,
+          "postfirst_seconds": 97.976002075,
+          "postfirst_tok_s": 57.299745663254555,
+          "actual_input_min": 124923,
+          "actual_input_max": 124923
+        },
+        "code": {
+          "postfirst_tokens": 1888,
+          "postfirst_seconds": 26.784532858999995,
+          "postfirst_tok_s": 70.48844233867624,
+          "actual_input_min": 124921,
+          "actual_input_max": 124921
+        },
+        "agent": {
+          "postfirst_tokens": 576,
+          "postfirst_seconds": 9.224934325999989,
+          "postfirst_tok_s": 62.43946890511453,
+          "actual_input_min": 124920,
+          "actual_input_max": 126559
+        }
+      }
+    },
+    {
+      "configuration": "optimized-mtp4",
+      "profile": "configs/laptop-128k-mtp4.json",
+      "draft_window": 4,
+      "indexed_proposal_head": true,
+      "binary_sha256": "17577585c75c2a63c2f71ce2d44a1d3dfa76e82c024361ac30027c1a3ebc8a95",
+      "measurement_complete": true,
+      "content_checks_all_passed": true,
+      "mixed": {
+        "postfirst_tokens": 5137,
+        "postfirst_seconds": 59.91608279400001,
+        "postfirst_tok_s": 85.73657957015872,
+        "actual_input_min": 124920,
+        "actual_input_max": 126559
+      },
+      "categories": {
+        "reasoning": {
+          "postfirst_tokens": 2640,
+          "postfirst_seconds": 34.05617338000002,
+          "postfirst_tok_s": 77.51898519374987,
+          "actual_input_min": 124923,
+          "actual_input_max": 124923
+        },
+        "code": {
+          "postfirst_tokens": 1964,
+          "postfirst_seconds": 18.862485252,
+          "postfirst_tok_s": 104.12201646608344,
+          "actual_input_min": 124921,
+          "actual_input_max": 124921
+        },
+        "agent": {
+          "postfirst_tokens": 533,
+          "postfirst_seconds": 6.997424161999997,
+          "postfirst_tok_s": 76.17088626619119,
+          "actual_input_min": 124920,
+          "actual_input_max": 126559
+        }
+      },
+      "observed_change_vs_preselected_baseline_percent": 42.20668292219663
+    },
+    {
+      "configuration": "optimized-mtp3",
+      "profile": "configs/laptop-128k-mtp3.json",
+      "draft_window": 3,
+      "indexed_proposal_head": true,
+      "binary_sha256": "17577585c75c2a63c2f71ce2d44a1d3dfa76e82c024361ac30027c1a3ebc8a95",
+      "measurement_complete": true,
+      "content_checks_all_passed": true,
+      "mixed": {
+        "postfirst_tokens": 5724,
+        "postfirst_seconds": 70.26253172500003,
+        "postfirst_tok_s": 81.46589454537617,
+        "actual_input_min": 124920,
+        "actual_input_max": 126559
+      },
+      "categories": {
+        "reasoning": {
+          "postfirst_tokens": 3310,
+          "postfirst_seconds": 43.41344203700001,
+          "postfirst_tok_s": 76.24366658554702,
+          "actual_input_min": 124923,
+          "actual_input_max": 124923
+        },
+        "code": {
+          "postfirst_tokens": 1763,
+          "postfirst_seconds": 18.87775376000002,
+          "postfirst_tok_s": 93.39034836526008,
+          "actual_input_min": 124921,
+          "actual_input_max": 124921
+        },
+        "agent": {
+          "postfirst_tokens": 651,
+          "postfirst_seconds": 7.971335928000008,
+          "postfirst_tok_s": 81.66761580242856,
+          "actual_input_min": 124920,
+          "actual_input_max": 126559
+        }
+      },
+      "observed_change_vs_preselected_baseline_percent": 35.12312588942683
+    }
+  ],
+  "cached_agent": {
+    "draft_window": 4,
+    "profile": "configs/laptop-128k-mtp4.json",
+    "binary_sha256": "17577585c75c2a63c2f71ce2d44a1d3dfa76e82c024361ac30027c1a3ebc8a95",
+    "trials": 5,
+    "stages_per_trial": 4,
+    "sample_count": 20,
+    "minimum_verified_cache_hit_tokens": 102400,
+    "samples_with_verified_cache_hit": 20,
+    "missing_or_missed_cache_hit_samples": 0,
+    "measurement_complete": true,
+    "content_checks_all_passed": true,
+    "numerical_validation_status": "PASS",
+    "ttft_endpoint": "first visible content or tool output",
+    "quantile_method": "nearest-rank observed P95",
+    "p95_seconds": 1.728910799982259,
+    "median_seconds": 1.13122929999372,
+    "small_sample": true,
+    "ttft_samples_seconds": [
+      1.031383099994855,
+      1.1803435999900103,
+      1.7074804000149015,
+      0.27973650000058115,
+      1.0209176999924239,
+      1.1596978000015952,
+      1.6786498999863397,
+      0.2794581000052858,
+      1.050150199997006,
+      1.1958612999878824,
+      1.70267060000333,
+      0.264060099987546,
+      1.059923799999524,
+      1.211204799998086,
+      1.728910799982259,
+      0.2638006999914069,
+      1.1027607999858446,
+      1.227503699978115,
+      1.8034432000131346,
+      0.2889445000037085
+    ]
+  },
+  "numerical_validation": {
+    "status": "PASS",
+    "binary_sha256": "17577585c75c2a63c2f71ce2d44a1d3dfa76e82c024361ac30027c1a3ebc8a95",
+    "equivalence_standard": "Stored weights, activation precision, KV format and original numerical tolerances are preserved.",
+    "public_tests": [
+      {
+        "name": "ninfer_linear_indexed_rows_test",
+        "status": "PASS",
+        "binary_sha256": "6468b0fba70277dda99081ec43a84de3d4af55de08ebc2d42e12f212159df7a1"
+      },
+      {
+        "name": "ninfer_gdn_input_proj_test",
+        "status": "PASS",
+        "binary_sha256": "03c260f0d977097f95f3bded25384f342324243471d783d7082b6af6d577f0a8"
+      }
+    ]
+  },
+  "sampling_scope": {
+    "optimized": "One complete observation per MTP window, with no additional warmup.",
+    "baseline": "Derived from one preselected historical reasoning repetition and subsequent code/Agent measurements.",
+    "interpretation": "The aggregate uses actual committed token counts and request durations."
+  },
+  "source_record_sha256": {
+    "mixed_comparison": "f893d73423dba705b66b2121ce6b136bf6d39203f5fb2c4b7b432f386b8e2af7",
+    "derived_baseline": "a7229653e43d087cbd7566c590ccc54a48d98137d18a6444e2a4108019f48544",
+    "cached_agent": "2827228e6c905e8c9918bee0a03b1608d5029b49286eff2d3a69f9e491da3e2e",
+    "numerical_validation": "8e6443b703b50785724bc72a2f3b9afad32ed7515fc2254dd80bb4f9ad09e489"
+  },
+  "source_repository": {
+    "repository": "https://github.com/toddballinger/ninfer-5080",
+    "tag": "qwen3.8-27b-rtx5080-128k-vision-v1.5",
+    "commit": "e4edd6d5c5f9f7996de0f3d9f6c311e883452580"
+  }
+}

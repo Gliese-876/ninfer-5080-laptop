@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include "core/pdl.cuh"
@@ -410,8 +411,13 @@ struct Q4GemvStoreEpilogue {
     }
 };
 
+struct Q4GemvIdentityRows {
+    __device__ __forceinline__ int weight_row(int output_row) const { return output_row; }
+};
+
 template <class Schedule, bool SplitOutput = false, int SplitRow = 0,
-          class Epilogue = Q4GemvStoreEpilogue, bool TriggerPdl = false, bool JoinPdl = false>
+          class Epilogue = Q4GemvStoreEpilogue, bool TriggerPdl = false, bool JoinPdl = false,
+          class RowPolicy = Q4GemvIdentityRows>
 __global__ __launch_bounds__(Schedule::kThreads, Schedule::kLaunchBoundsMinBlocks)
 void q4_rowsplit_gemv_kernel(
     const __nv_bfloat16* __restrict__ x,
@@ -421,7 +427,7 @@ void q4_rowsplit_gemv_kernel(
     __nv_bfloat16* __restrict__ out_tail,
     std::int32_t rows,
     std::int32_t k,
-    Epilogue epilogue = {}) {
+    Epilogue epilogue = {}, RowPolicy row_policy = {}) {
     // clang-format on
     constexpr int kRowsPerCta  = Schedule::kRowsPerCta;
     constexpr int kWarpsPerRow = Schedule::kWarpsPerRow;
@@ -455,6 +461,7 @@ void q4_rowsplit_gemv_kernel(
     const int row_in_cta  = cta_warp / kWarpsPerRow;
     const int warp_in_row = cta_warp % kWarpsPerRow;
     const int row         = static_cast<int>(blockIdx.x) * kRowsPerCta + row_in_cta;
+    const int weight_row  = row_policy.weight_row(row);
 
     const int groups_per_row = Schedule::kStaticGroupsPerRow > 0 ? Schedule::kStaticGroupsPerRow
                                                                  : k / Q4RowSplitStorage::kGroupK;
@@ -475,9 +482,9 @@ void q4_rowsplit_gemv_kernel(
         group_end               = pair_end * 2;
     }
 
-    const std::uint8_t* code_row = codes + static_cast<std::int64_t>(row) * groups_per_row *
+    const std::uint8_t* code_row = codes + static_cast<std::int64_t>(weight_row) * groups_per_row *
                                                Q4RowSplitStorage::kCodeBytesPerGroup;
-    const std::uint8_t* scale_row = scales + static_cast<std::int64_t>(row) * groups_per_row *
+    const std::uint8_t* scale_row = scales + static_cast<std::int64_t>(weight_row) * groups_per_row *
                                                  Q4RowSplitStorage::kScaleBytesPerGroup;
     const __nv_bfloat16* activation =
         Schedule::kActivationAccess == Q4GemvActivationAccess::CtaSharedFullK ? shared_x : x;

@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ops/linear/q4/q4_rowsplit_gemm_mma.cuh"
 
 #include "core/device.h"
@@ -66,7 +67,13 @@ using Q4MmaR64C128Schedule =
     Q4RowSplitMmaGemmSchedule<64, 128, 64, 64, 32, 2, 1, Q4FragmentPipeline::Serial, Cache::cg,
                               Cache::cg, Q4ScaleLoad::Pair32>;
 
-template <class Schedule, bool Full>
+// Canonical Qwen3.8 dense prompt route; identical scaled-BF16 weight
+// rounding and per-output MMA K sequence, vector shared-weight decode.
+using Q4Qwen38PrefillVectorSchedule =
+    Q4RowSplitMmaGemmSchedule<64, 128, 64, 64, 32, 2, 1, Q4FragmentPipeline::Serial,
+                              Cache::cg, Cache::cg, Q4ScaleLoad::Pair32>;
+
+template <class Schedule, bool Full, bool VectorDecode = false>
 void launch_schedule(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     const std::int32_t rows     = out.ne[0];
     const std::int32_t k        = x.ne[0];
@@ -88,14 +95,14 @@ void launch_schedule(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t
             "Q4 MMA output column stride is smaller than logical rows");
     }
 
-    q4_rowsplit_gemm_mma_kernel<Schedule, Full><<<grid, Schedule::kThreads, 0, stream>>>(
+    q4_rowsplit_gemm_mma_kernel<Schedule, Full, VectorDecode><<<grid, Schedule::kThreads, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
         static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data), rows, k,
         cols, padded_k, out_col_stride);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <class Schedule>
+template <class Schedule, bool VectorDecode = false>
 void launch_route(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     const bool full =
         (out.ne[0] % Schedule::kBlockRows) == 0 && (x.ne[1] % Schedule::kBlockCols) == 0;
@@ -104,9 +111,9 @@ void launch_route(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t st
                              const Tensor x_slice = x.slice(1, offset, count);
                              Tensor out_slice     = out.slice(1, offset, count);
                              if (full) {
-                                 launch_schedule<Schedule, true>(x_slice, w, out_slice, stream);
+                                 launch_schedule<Schedule, true, VectorDecode>(x_slice, w, out_slice, stream);
                              } else {
-                                 launch_schedule<Schedule, false>(x_slice, w, out_slice, stream);
+                                 launch_schedule<Schedule, false, VectorDecode>(x_slice, w, out_slice, stream);
                              }
                          });
 }
@@ -115,6 +122,11 @@ void launch_route(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t st
 
 void q4_rowsplit_mma_prewarm() {
     cudaFuncAttributes attr{};
+
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr, q4_rowsplit_gemm_mma_kernel<Q4Qwen38PrefillVectorSchedule, true, true>));
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr, q4_rowsplit_gemm_mma_kernel<Q4Qwen38PrefillVectorSchedule, false, true>));
 
     CUDA_CHECK(cudaFuncGetAttributes(
         &attr,
@@ -344,6 +356,11 @@ void launch_q4_mma_r64_c120(const Tensor& x, const Weight& w, Tensor& out, cudaS
 
 void launch_q4_mma_r64_c128(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     launch_route<Q4MmaR64C128Schedule>(x, w, out, stream);
+}
+
+void launch_q4_qwen38_prefill_vector(const Tensor& x, const Weight& w, Tensor& out,
+                                     cudaStream_t stream) {
+    launch_route<Q4Qwen38PrefillVectorSchedule, true>(x, w, out, stream);
 }
 
 } // namespace ninfer::ops::detail

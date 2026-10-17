@@ -1,3 +1,5 @@
+> Record from [toddballinger/ninfer-5080](https://github.com/toddballinger/ninfer-5080). The [project README](../README.md) describes the laptop implementation.
+
 # Qwen3.8-27B RTX 5080 128K + Vision v1.2
 
 ## Validated source

@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 #include "targets/qwen3_6/impl/runtime/instance.h"
 // Qwen3.6 family runtime implementation; instantiated only by exact variants.
@@ -164,10 +165,13 @@ public:
     TextContext(const TextContext&)            = delete;
     TextContext& operator=(const TextContext&) = delete;
 
-    void set_proposal_head(const Weight* weight, const std::int32_t* ids, int count) noexcept {
+    void set_proposal_head(const Weight* weight, const std::int32_t* ids, int count,
+                           qwen3_6::ProposalHeadStorage storage =
+                               qwen3_6::ProposalHeadStorage::Compact) noexcept {
         proposal_head_     = weight;
         proposal_head_ids_ = ids;
         proposal_head_n_   = count;
+        proposal_head_storage_ = storage;
     }
 
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
@@ -332,6 +336,7 @@ private:
     const Weight* proposal_head_                = nullptr;
     const std::int32_t* proposal_head_ids_      = nullptr;
     int proposal_head_n_                        = 0;
+    qwen3_6::ProposalHeadStorage proposal_head_storage_ = qwen3_6::ProposalHeadStorage::Compact;
     const ops::SamplingConfig* sampling_config_ = nullptr;
     MtpW mtp_;
     std::array<FullLayerW, TextConfig::full_attention_layers()> full_{};

@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "targets/qwen3_6_27b/impl/load/bindings.h"
 
 #include "artifact/typed_binding.h"
@@ -8,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <initializer_list>
 #include <limits>
 #include <span>
@@ -57,7 +59,7 @@ NumericFormat output_head_format(WeightsProfile weights_profile) {
 std::uint32_t read_u32_le(std::span<const std::byte> bytes, std::uint64_t offset,
                           std::string_view label) {
     if (offset > bytes.size() || bytes.size() - static_cast<std::size_t>(offset) < 4) {
-        throw artifact::ArtifactError(std::string(label) + ": FP32 word is outside payload");
+        throw artifact::ArtifactError(std::string(label) + ": 32-bit word is outside payload");
     }
     const std::byte* value = bytes.data() + static_cast<std::size_t>(offset);
     return std::to_integer<std::uint32_t>(value[0]) |
@@ -525,6 +527,50 @@ void validate_draft_ids(const artifact::Binder& binder, artifact::ObjectHandle h
 
 } // namespace
 
+void validate_indexed_proposal_head(const artifact::Binder& binder,
+                                    artifact::ObjectHandle output_head,
+                                    artifact::ObjectHandle draft_head,
+                                    artifact::ObjectHandle token_ids) {
+    const auto& full = std::get<artifact::TensorDescriptor>(binder.descriptor(output_head));
+    const auto& draft = std::get<artifact::TensorDescriptor>(binder.descriptor(draft_head));
+    const artifact::RowSplitGeometry full_geometry =
+        artifact::row_split_geometry(NumericFormat::Q4G64_F16S, full.shape);
+    const artifact::RowSplitGeometry draft_geometry =
+        artifact::row_split_geometry(NumericFormat::Q4G64_F16S, draft.shape);
+    const auto full_bytes = binder.payload(output_head).data;
+    const auto draft_bytes = binder.payload(draft_head).data;
+    const auto id_bytes = binder.payload(token_ids).data;
+    const std::uint64_t code_row_bytes =
+        draft_geometry.groups_per_row * draft_geometry.low_bytes_per_group;
+    const std::uint64_t scale_row_bytes =
+        draft_geometry.scale_plane_bytes / draft_geometry.rows;
+    if (full_geometry.columns != draft_geometry.columns ||
+        id_bytes.size() != draft_geometry.rows * sizeof(std::uint32_t)) {
+        throw artifact::ArtifactError("indexed draft-head shape does not match output head or ids");
+    }
+    for (std::uint64_t row = 0; row < draft_geometry.rows; ++row) {
+        const std::uint32_t id =
+            read_u32_le(id_bytes, row * sizeof(std::uint32_t), "draft-head token ids");
+        if (id >= full_geometry.rows) {
+            throw artifact::ArtifactError("indexed draft-head token id is outside output head");
+        }
+        const bool codes_equal =
+            std::memcmp(draft_bytes.data() + row * code_row_bytes,
+                        full_bytes.data() + id * code_row_bytes, code_row_bytes) == 0;
+        const bool scales_equal =
+            std::memcmp(draft_bytes.data() + draft_geometry.scale_plane_offset +
+                            row * scale_row_bytes,
+                        full_bytes.data() + full_geometry.scale_plane_offset +
+                            id * scale_row_bytes,
+                        scale_row_bytes) == 0;
+        if (!codes_equal || !scales_equal) {
+            throw artifact::ArtifactError("indexed draft-head row " + std::to_string(row) +
+                                          " is not byte-identical to output-head row " +
+                                          std::to_string(id));
+        }
+    }
+}
+
 ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_profile,
                                qwen3_6::StartupFeatures features) {
     ArtifactLoadPlan load_plan;
@@ -562,11 +608,21 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
     const artifact::TensorPlacement proposal_placement =
         features.optimized_proposal() ? artifact::TensorPlacement::Device
                                       : artifact::TensorPlacement::ValidateOnly;
+    const bool indexed_proposal =
+        weights_profile == WeightsProfile::Qwen38GroupwiseInt5080 && features.mtp() &&
+        features.optimized_proposal();
     out.draft_head = artifact::bind_tensor(binder, "text/draft_head", NumericFormat::Q4G64_F16S,
-                                           {131072, 5120}, proposal_placement);
+                                           {131072, 5120},
+                                           indexed_proposal ? artifact::TensorPlacement::ValidateOnly
+                                                            : proposal_placement);
     out.draft_head_token_ids = artifact::bind_tensor(
         binder, "text/draft_head_token_ids", NumericFormat::I32, {131072}, proposal_placement);
     validate_draft_ids(binder, out.draft_head_token_ids);
+    if (indexed_proposal) {
+        validate_indexed_proposal_head(binder, out.output_head.object, out.draft_head,
+                                      out.draft_head_token_ids);
+        out.proposal_head_storage = qwen3_6::ProposalHeadStorage::IndexedOutputRows;
+    }
 
     const artifact::TensorPlacement mtp_placement = features.mtp()
                                                         ? artifact::TensorPlacement::Device
@@ -690,8 +746,12 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     output_head = materialized_weight(backing, plan.output_head, 248320, 5120);
     if (plan.features.optimized_proposal()) {
         auto& proposal     = runtime.optimized_proposal.emplace();
-        proposal.head      = artifact::materialized_weight(backing, plan.draft_head,
-                                                           NumericFormat::Q4G64_F16S, 131072, 5120);
+        proposal.storage   = plan.proposal_head_storage;
+        proposal.head      = proposal.storage == qwen3_6::ProposalHeadStorage::IndexedOutputRows
+                                 ? output_head
+                                 : artifact::materialized_weight(backing, plan.draft_head,
+                                                                  NumericFormat::Q4G64_F16S,
+                                                                  131072, 5120);
         proposal.token_ids = artifact::materialized_tensor(backing, plan.draft_head_token_ids,
                                                            NumericFormat::I32, {131072});
     }

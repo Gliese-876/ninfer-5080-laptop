@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include "targets/qwen3_6/impl/frontend/chat_template.h"
@@ -120,7 +121,8 @@ struct EncodedChat {
     std::optional<RewriteCheckpointSpec> rewrite_checkpoint;
 };
 
-EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat& rendered);
+EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat& rendered,
+                                bool cache_text_runs = false);
 
 class Processor {
 public:

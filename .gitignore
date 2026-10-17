@@ -74,3 +74,10 @@ iterable
 *.xloadbatch-*
 *.q3-directx-*
 *.q3-t32-mma-*
+
+# Local execution evidence and downloaded artifacts
+logs/
+figure-qa/
+benchmark-local/
+*.ninfer
+*.download.part

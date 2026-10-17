@@ -1,0 +1,12 @@
+NInfer RTX 5080 Laptop
+
+Derived from toddballinger/ninfer-5080 v1.5 and Neroued/ninfer.
+Copyright and attribution notices from both source repositories remain in the source.
+
+RTX 5080 Laptop modifications and documentation: Copyright 2026 Gliese-876.
+Distributed under the Apache License, Version 2.0.
+Bundled dependencies retain their own license and attribution files.
+Model artifacts are distributed separately by their original publishers.
+
+Noto Sans fonts in figure_sources/fonts are distributed under the SIL Open Font License 1.1.
+Copyright 2022 The Noto Project Authors. See figure_sources/fonts/OFL.txt and SOURCE.json.

@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include <cuda_bf16.h>
@@ -10,6 +11,48 @@
 #include <cstdint>
 
 namespace ninfer::ops {
+
+// Native signed-Q4 matrix loads expand K into the exact INT8 MMA fragment in
+// registers. K and V remain packed while the next tile is copied during PV;
+// PV reads only p_s/v_f16, so one packed staging buffer is sufficient.
+inline constexpr int kGqaPrefillQ4PackedKBytes = kGqaPrefillI8Bc * kGqaPrefillHeadDim / 2;
+inline constexpr int kGqaPrefillQ4PackedVBytes = kGqaPrefillQ4PackedKBytes;
+inline constexpr int kGqaPrefillQ4SmemBytes =
+    kGqaPrefillI8QBytes + kGqaPrefillI8QScaleBytes + kGqaPrefillQ4PackedKBytes +
+    kGqaPrefillQ4PackedVBytes + kGqaPrefillI8VStageBytes + kGqaPrefillI8PBytes +
+    kGqaPrefillI8ScaleBytes + kGqaPrefillI8StatsBytes;
+static_assert(kGqaPrefillQ4SmemBytes == 76288);
+
+// Permute 16-byte packed segments, preserving the two adjacent 8-byte rows
+// consumed by m8n16.x2.s8.s4. Both cp.async and matrix row addresses remain
+// naturally aligned. A row contains exactly eight such segments.
+__device__ __forceinline__ int gqa_prefill_q4_k_swz(int row, int packed_byte) {
+    return (((packed_byte >> 4) ^ (row & 7)) << 4) | (packed_byte & 15);
+}
+
+__device__ __forceinline__ void gqa_prefill_q4_ldmatrix_s8(unsigned& b0, unsigned& b1,
+                                                          unsigned address) {
+    asm volatile("ldmatrix.sync.aligned.m8n16.x2.shared::cta.s8.s4 {%0,%1}, [%2];\n"
+                 : "=r"(b0), "=r"(b1) : "r"(address));
+}
+
+__device__ __forceinline__ int4 gqa_prefill_q4_dequant_f16x8(const std::uint8_t* codes4,
+                                                            __half scale) {
+    const unsigned raw = load_vec<unsigned>(codes4);
+    const __half2 s2 = __halves2half2(scale, scale);
+    unsigned packed[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const auto byte = static_cast<std::uint8_t>(raw >> (8 * i));
+        const __half2 code2 = __floats2half2_rn(
+            static_cast<float>(gqa_kv_unpack_q4_low(byte)),
+            static_cast<float>(gqa_kv_unpack_q4_high(byte)));
+        const __half2 value2 = __hmul2(code2, s2);
+        packed[i] = *reinterpret_cast<const unsigned*>(&value2);
+    }
+    return make_int4(static_cast<int>(packed[0]), static_cast<int>(packed[1]),
+                     static_cast<int>(packed[2]), static_cast<int>(packed[3]));
+}
 
 template <typename Geometry, typename Metadata>
 __launch_bounds__(256) __global__
@@ -221,7 +264,9 @@ void gqa_attention_prefill_fill_q4_page_kernel(
 }
 
 
-template <typename Geometry, typename Metadata>
+// The expanded instantiation is a test-only control for v1.5 bitwise regression
+// checks. Every production launcher instantiates the native packed schedule.
+template <typename Geometry, typename Metadata, bool NativePackedKV = true>
 __global__ __maxnreg__(120) void gqa_attention_prefill_q4_kernel(
     const __nv_bfloat16* __restrict__ q, const std::uint8_t* __restrict__ cache_k,
     const std::uint8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
@@ -249,10 +294,12 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_q4_kernel(
     extern __shared__ __align__(16) unsigned char smem_raw[];
     std::int8_t* q_i8 = reinterpret_cast<std::int8_t*>(smem_raw);
     float* q_scale    = reinterpret_cast<float*>(q_i8 + kGqaPrefillI8QBytes);
-    std::int8_t* k_i8 = reinterpret_cast<std::int8_t*>(reinterpret_cast<unsigned char*>(q_scale) +
-                                                       kGqaPrefillI8QScaleBytes);
-    std::int8_t* v_i8 = k_i8 + kGqaPrefillI8KBytes;
-    __half* v_f16     = reinterpret_cast<__half*>(v_i8 + kGqaPrefillI8VBytes);
+    auto* k_stage = reinterpret_cast<unsigned char*>(q_scale) + kGqaPrefillI8QScaleBytes;
+    auto* v_stage = k_stage + (NativePackedKV ? kGqaPrefillQ4PackedKBytes : kGqaPrefillI8KBytes);
+    std::int8_t* k_i8 = reinterpret_cast<std::int8_t*>(k_stage);
+    std::int8_t* v_i8 = reinterpret_cast<std::int8_t*>(v_stage);
+    __half* v_f16 = reinterpret_cast<__half*>(
+        v_stage + (NativePackedKV ? kGqaPrefillQ4PackedVBytes : kGqaPrefillI8VBytes));
     __half* p_s       = reinterpret_cast<__half*>(reinterpret_cast<unsigned char*>(v_f16) +
                                                   kGqaPrefillI8VStageBytes);
     __half* k_scale_s =
@@ -325,6 +372,30 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_q4_kernel(
             }
         }
 
+        if constexpr (NativePackedKV) {
+            // A 16-byte copy carries 32 exact Q4 codes. These copies overlap
+            // the preceding tile's FP16 PV MMA after its K/P/V readers finish.
+#pragma unroll 1
+            for (int chunk = tid; chunk < Bc * (D / 32);
+                 chunk += kGqaPrefillI8Threads) {
+                const int key_l = chunk / (D / 32);
+                const int packed_byte = (chunk % (D / 32)) * 16;
+                const int key = tile_k0 + key_l;
+                auto* kd = k_stage + key_l * (D / 2) +
+                           gqa_prefill_q4_k_swz(key_l, packed_byte);
+                auto* vd = v_stage + key_l * (D / 2) + packed_byte;
+                if (key <= max_query_abs) {
+                    const std::int64_t off = gqa_kv_q4_code_index<Geometry>(
+                        physical_page, kv_head, packed_byte * 2, key & kPagedKVPageMask);
+                    ninfer::ops::cp_async<16>(kd, &cache_k[off]);
+                    ninfer::ops::cp_async<16>(vd, &cache_v[off]);
+                } else {
+                    store_vec(kd, make_int4(0, 0, 0, 0));
+                    store_vec(vd, make_int4(0, 0, 0, 0));
+                }
+            }
+        } else {
+        // Test control: v1.5 expands global Q4 to shared INT8 before PV.
         // Global Q4 uses 8 packed bytes for each 16-dimension chunk.
         // Expand those 16 signed nibble values into the exact INT8 shared
         // tile layout consumed by the existing mma_s8 QK path.
@@ -374,8 +445,9 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_q4_kernel(
                 store_vec(vd, make_int4(0, 0, 0, 0));
             }
         }
+        }
 
-        // Only the scale copies above are asynchronous.
+        // The packed production path copies both codes and scales asynchronously.
         ninfer::ops::cp_commit();
     };
 
@@ -464,8 +536,18 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_q4_kernel(
                         const int brow = nt * 8 + b_rin;
                         const int bcol = k * 16 + b_koff;
                         unsigned bf[2];
-                        ldmatrix_x2(bf[0], bf[1],
-                                    smem_addr(&k_b16[brow * DB16 + gqa_prefill_swz(brow, bcol)]));
+                        if constexpr (NativePackedKV) {
+                            // bcol counts two INT8 values in the reference layout
+                            // and therefore counts one packed byte here. The two
+                            // matrix rows expand to the same b0/b1 INT8 registers.
+                            gqa_prefill_q4_ldmatrix_s8(
+                                bf[0], bf[1],
+                                smem_addr(k_stage + brow * (D / 2) +
+                                          gqa_prefill_q4_k_swz(brow, bcol)));
+                        } else {
+                            ldmatrix_x2(bf[0], bf[1],
+                                smem_addr(&k_b16[brow * DB16 + gqa_prefill_swz(brow, bcol)]));
+                        }
                         mma_s8(c0, c1, c2, c3, af[kk][0], af[kk][1], af[kk][2], af[kk][3], bf[0],
                                bf[1]);
                     }
@@ -568,7 +650,12 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_q4_kernel(
                     __half vs     = __float2half_rn(0.0f);
                     if ((lane & 7) == 0) { vs = v_scale_s[key_l * Groups + grp]; }
                     vs = __shfl_sync(FullMask, vs, grp * 8);
-                    store_vec(dst, gqa_prefill_i8_dequant_f16x8(&v_i8[key_l * D + d], vs));
+                    if constexpr (NativePackedKV) {
+                        store_vec(dst, gqa_prefill_q4_dequant_f16x8(
+                            v_stage + key_l * (D / 2) + d / 2, vs));
+                    } else {
+                        store_vec(dst, gqa_prefill_i8_dequant_f16x8(&v_i8[key_l * D + d], vs));
+                    }
                 } else {
                     store_vec(dst, make_int4(0, 0, 0, 0));
                 }

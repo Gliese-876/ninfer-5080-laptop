@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include "core/tensor.h"
@@ -15,16 +16,19 @@ void launch_q4_gemv_r1_w8_direct(const Tensor& x, const Weight& w, Tensor& out,
 void launch_q4_simt_r8_c4(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
 void launch_q4_simt_r8_c8(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
 void q4_small_t_mma_prewarm();
+void q4_gather_rows_prewarm();
+void launch_q4_gather_rows(const Tensor& x, const Weight& source, const Tensor& row_ids,
+                           Tensor& out, cudaStream_t stream);
 
 void launch_q4_draft_head_small_t(const Tensor& x, const Weight& w, Tensor& out,
                                   cudaStream_t stream);
-// Qwen3.8-27B exact T=4 tensor-core paths.
-void launch_q4_qwen38_down_t4(const Tensor& x, const Weight& w, Tensor& out,
-                              cudaStream_t stream);
-void launch_q4_qwen38_gdn_out_t4(const Tensor& x, const Weight& w, Tensor& out,
-                                 cudaStream_t stream);
-void launch_q4_qwen38_head_t4(const Tensor& x, const Weight& w, Tensor& out,
-                              cudaStream_t stream);
+// Qwen3.8-27B exact T=4..8 tensor-core paths.
+void launch_q4_qwen38_down_small_t(const Tensor& x, const Weight& w, Tensor& out,
+                                   cudaStream_t stream);
+void launch_q4_qwen38_gdn_out_small_t(const Tensor& x, const Weight& w, Tensor& out,
+                                      cudaStream_t stream);
+void launch_q4_qwen38_head_small_t(const Tensor& x, const Weight& w, Tensor& out,
+                                   cudaStream_t stream);
 
 void q4_rowsplit_mma_prewarm();
 
@@ -46,5 +50,7 @@ void launch_q4_mma_r64_c120_partial(const Tensor& x, const Weight& w, Tensor& ou
                                     cudaStream_t stream);
 void launch_q4_mma_r64_c120(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
 void launch_q4_mma_r64_c128(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
+void launch_q4_qwen38_prefill_vector(const Tensor& x, const Weight& w, Tensor& out,
+                                     cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

@@ -1,25 +1,34 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "artifact/binder.h"
 #include "artifact/reader.h"
+#include "artifact_fixture.h"
 #include "targets/qwen3_6_27b/impl/load/bindings.h"
 #include "targets/qwen3_6_27b/impl/variant.h"
 
 #include <ninfer/targets/qwen3_6_27b/package.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <variant>
+#include <vector>
 
 namespace {
 
 using ninfer::artifact::NumericFormat;
 using ninfer::targets::qwen3_6_27b::Package;
 using namespace ninfer::targets::qwen3_6_27b::detail;
+using ninfer::targets::qwen3_6::ProposalHeadStorage;
 
 std::filesystem::path artifact_path(const char* environment, const char* filename) {
     if (const char* value = std::getenv(environment); value != nullptr && *value != '\0') {
@@ -85,6 +94,143 @@ bool valid_divisors(const WeightPlan& weight) {
            input_divisor > 0.0F;
 }
 
+int verify_indexed_proposal_exact_proof() {
+    using namespace ninfer::test::artifact_fixture;
+    constexpr std::array<std::uint64_t, 2> full_shape{7, 130};
+    constexpr std::array<std::uint64_t, 2> draft_shape{3, 130};
+    constexpr std::array<std::uint32_t, 3> ids{6, 0, 4};
+    const auto full = ninfer::artifact::row_split_geometry(NumericFormat::Q4G64_F16S, full_shape);
+    const auto draft = ninfer::artifact::row_split_geometry(NumericFormat::Q4G64_F16S, draft_shape);
+    const std::uint64_t code_row_bytes = full.groups_per_row * full.low_bytes_per_group;
+    const std::uint64_t scale_row_bytes = full.scale_plane_bytes / full.rows;
+    std::vector<std::byte> full_bytes(full.encoded_bytes, std::byte{0});
+    std::vector<std::byte> draft_bytes(draft.encoded_bytes, std::byte{0});
+    std::array<std::byte, ids.size() * sizeof(std::uint32_t)> id_bytes{};
+    for (std::uint64_t row = 0; row < full.rows; ++row) {
+        for (std::uint64_t byte = 0; byte < code_row_bytes; ++byte) {
+            full_bytes[row * code_row_bytes + byte] = std::byte((17 * row + byte) & 0xff);
+        }
+        for (std::uint64_t byte = 0; byte < scale_row_bytes; ++byte) {
+            full_bytes[full.scale_plane_offset + row * scale_row_bytes + byte] =
+                std::byte((7 * row + byte) & 0xff);
+        }
+    }
+    for (std::size_t row = 0; row < ids.size(); ++row) {
+        std::memcpy(draft_bytes.data() + row * code_row_bytes,
+                    full_bytes.data() + ids[row] * code_row_bytes, code_row_bytes);
+        std::memcpy(draft_bytes.data() + draft.scale_plane_offset + row * scale_row_bytes,
+                    full_bytes.data() + full.scale_plane_offset + ids[row] * scale_row_bytes,
+                    scale_row_bytes);
+        for (unsigned byte = 0; byte < 4; ++byte) {
+            id_bytes[row * 4 + byte] = std::byte((ids[row] >> (8 * byte)) & 0xff);
+        }
+    }
+    // Q4 plane padding is not a row and need not match the full head's padding.
+    draft_bytes[draft.low_plane_bytes] = std::byte{0xff};
+    const std::uint64_t draft_offset = align_up(full.encoded_bytes, 256);
+    const std::uint64_t ids_offset = align_up(draft_offset + draft.encoded_bytes, 256);
+    const Json directory = {
+        {"identity", {{"model_id", "qwen3.8-27b"}, {"weights_id", "groupwise-int-5080"}}},
+        {"objects", Json::array({
+                        {{"name", "text/output_head"}, {"kind", "tensor"},
+                         {"shape", full_shape}, {"format", "Q4G64_F16S"},
+                         {"layout", "row-split-k128-v1"}, {"offset", 0},
+                         {"bytes", full.encoded_bytes}},
+                        {{"name", "text/draft_head"}, {"kind", "tensor"},
+                         {"shape", draft_shape}, {"format", "Q4G64_F16S"},
+                         {"layout", "row-split-k128-v1"}, {"offset", draft_offset},
+                         {"bytes", draft.encoded_bytes}},
+                        {{"name", "text/draft_head_token_ids"}, {"kind", "tensor"},
+                         {"shape", {ids.size()}}, {"format", "I32"},
+                         {"layout", "contiguous-le-v1"}, {"offset", ids_offset},
+                         {"bytes", id_bytes.size()}},
+                    })},
+    };
+    const std::uint64_t payload_offset = align_up(16 + directory.dump().size(), 4096);
+    for (unsigned mismatch = 0; mismatch < 3; ++mismatch) {
+        auto bytes = draft_bytes;
+        if (mismatch == 1) {
+            bytes[draft.rows * code_row_bytes - 1] ^= std::byte{1};
+        } else if (mismatch == 2) {
+            bytes[draft.scale_plane_offset + draft.scale_plane_bytes - 1] ^= std::byte{1};
+        }
+        const auto fixture = write_fixture(directory, "indexed_proposal_" + std::to_string(mismatch));
+        {
+            std::fstream output(fixture.path, std::ios::binary | std::ios::in | std::ios::out);
+            output.seekp(static_cast<std::streamoff>(payload_offset));
+            output.write(reinterpret_cast<const char*>(full_bytes.data()), full_bytes.size());
+            output.seekp(static_cast<std::streamoff>(payload_offset + draft_offset));
+            output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            output.seekp(static_cast<std::streamoff>(payload_offset + ids_offset));
+            output.write(reinterpret_cast<const char*>(id_bytes.data()), id_bytes.size());
+            if (!output) { throw std::runtime_error("failed to write indexed proposal fixture"); }
+        }
+        ninfer::artifact::Reader reader(fixture.path);
+        ninfer::artifact::Binder binder(reader);
+        const auto output_head = binder.require_tensor(
+            "text/output_head", NumericFormat::Q4G64_F16S,
+            ninfer::artifact::StorageLayout::RowSplitK128V1, full_shape);
+        const auto draft_head = binder.require_tensor(
+            "text/draft_head", NumericFormat::Q4G64_F16S,
+            ninfer::artifact::StorageLayout::RowSplitK128V1, draft_shape);
+        const std::array<std::uint64_t, 1> id_shape{ids.size()};
+        const auto token_ids = binder.require_tensor(
+            "text/draft_head_token_ids", NumericFormat::I32,
+            ninfer::artifact::StorageLayout::ContiguousLeV1, id_shape);
+        try {
+            validate_indexed_proposal_head(binder, output_head, draft_head, token_ids);
+        } catch (const ninfer::artifact::ArtifactError& error) {
+            if (mismatch != 0 &&
+                std::string(error.what()).find("row 2 is not byte-identical") != std::string::npos) {
+                continue;
+            }
+            std::cerr << "indexed proposal exact proof failed: " << error.what() << '\n';
+            return 1;
+        }
+        if (mismatch != 0) {
+            std::cerr << "indexed proposal accepted a different last-row "
+                      << (mismatch == 1 ? "code" : "scale") << " byte\n";
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int verify_indexed_proposal_plan(const std::filesystem::path& path) {
+    ninfer::artifact::Reader reader(path);
+    if (Package::resolve_weights(reader.identity()) != WeightsProfile::Qwen38GroupwiseInt5080) {
+        std::cerr << "5080 artifact resolved to the wrong weights profile\n";
+        return 1;
+    }
+    ninfer::artifact::Binder full_binder(reader);
+    const ArtifactLoadPlan full = bind_artifact(
+        full_binder, WeightsProfile::Qwen38GroupwiseInt5080, features(ninfer::SpeculativeBackend::Mtp));
+    ninfer::artifact::Binder optimized_binder(reader);
+    const ArtifactLoadPlan optimized = bind_artifact(
+        optimized_binder, WeightsProfile::Qwen38GroupwiseInt5080,
+        features(ninfer::SpeculativeBackend::Mtp, ninfer::ProposalHead::Optimized));
+    if (full.bindings.proposal_head_storage != ProposalHeadStorage::Compact ||
+        optimized.bindings.proposal_head_storage != ProposalHeadStorage::IndexedOutputRows ||
+        is_device_object(optimized.materialization, optimized.bindings.draft_head) ||
+        is_host_mapped_object(optimized.materialization, optimized.bindings.draft_head) ||
+        !is_device_object(optimized.materialization, optimized.bindings.draft_head_token_ids) ||
+        !is_device_object(optimized.materialization, optimized.bindings.output_head.object) ||
+        optimized.materialization.device_objects.size() !=
+            full.materialization.device_objects.size() + 1 ||
+        optimized.materialization.device_capacity_bytes !=
+            full.materialization.device_capacity_bytes + 131072 * sizeof(std::int32_t)) {
+        std::cerr << "indexed proposal materialization must add only the 0.5 MiB token ids\n";
+        return 1;
+    }
+    const auto& output = std::get<ninfer::artifact::TensorDescriptor>(
+        reader.objects().at(optimized.bindings.output_head.object.index));
+    if (output.shape != std::vector<std::uint64_t>{248320, 5120}) {
+        std::cerr << "indexed proposal changed the physical output-head shape\n";
+        return 1;
+    }
+    return 0;
+}
+
 int verify_groupwise(const std::filesystem::path& path) {
     ninfer::artifact::Reader reader(path);
     if (Package::resolve_weights(reader.identity()) != WeightsProfile::Qwen36GroupwiseInt) {
@@ -101,7 +247,8 @@ int verify_groupwise(const std::filesystem::path& path) {
         std::cerr << "groupwise materialization plan is incomplete\n";
         return 1;
     }
-    if (plan.bindings.token_embedding.format != NumericFormat::Q6G64_F16S ||
+    if (plan.bindings.proposal_head_storage != ProposalHeadStorage::Compact ||
+        plan.bindings.token_embedding.format != NumericFormat::Q6G64_F16S ||
         plan.bindings.output_head.format != NumericFormat::Q6G64_F16S) {
         std::cerr << "groupwise vocabulary endpoints have the wrong storage profile\n";
         return 1;
@@ -148,7 +295,8 @@ int verify_nvfp4(const std::filesystem::path& path) {
                   << " host=" << plan.materialization.host_objects.size() << '\n';
         return 1;
     }
-    if (plan.bindings.token_embedding.format != NumericFormat::W8G32_F16S ||
+    if (plan.bindings.proposal_head_storage != ProposalHeadStorage::Compact ||
+        plan.bindings.token_embedding.format != NumericFormat::W8G32_F16S ||
         plan.bindings.output_head.format != NumericFormat::W8G32_F16S) {
         std::cerr << "NVFP4 vocabulary endpoints have the wrong storage profile\n";
         return 1;
@@ -307,7 +455,8 @@ int verify_dflash2_bundle(const std::filesystem::path& path, WeightsProfile prof
     const ArtifactLoadPlan plan = bind_artifact(
         binder, profile,
         features(ninfer::SpeculativeBackend::DFlash2, ninfer::ProposalHead::Optimized));
-    if (!plan.bindings.dflash2 || dflash2_device_objects(reader, plan.materialization) != 66 ||
+    if (plan.bindings.proposal_head_storage != ProposalHeadStorage::Compact ||
+        !plan.bindings.dflash2 || dflash2_device_objects(reader, plan.materialization) != 66 ||
         is_device_object(plan.materialization, plan.bindings.mtp.input_projection.object) ||
         !is_device_object(plan.materialization, plan.bindings.draft_head) ||
         !is_device_object(plan.materialization, plan.bindings.draft_head_token_ids)) {
@@ -353,6 +502,13 @@ int verify_profile_mismatch_rejection() {
 } // namespace
 
 int main() {
+    if (const int result = verify_indexed_proposal_exact_proof(); result != 0) { return result; }
+    const std::filesystem::path qwen38_5080 =
+        artifact_path("NINFER_QWEN3_8_27B_5080_WEIGHTS", "qwen3_8_27b_5080.ninfer");
+    const bool has_5080 = std::filesystem::is_regular_file(qwen38_5080);
+    if (has_5080) {
+        if (const int result = verify_indexed_proposal_plan(qwen38_5080); result != 0) { return result; }
+    }
     const std::filesystem::path groupwise =
         artifact_path("NINFER_QWEN3_6_27B_WEIGHTS", "qwen3_6_27b.ninfer");
     const std::filesystem::path nvfp4 =
@@ -368,7 +524,7 @@ int main() {
     if (!std::filesystem::is_regular_file(groupwise) || !std::filesystem::is_regular_file(nvfp4)) {
         std::cerr << "skip: both real 27B artifacts are required: groupwise=" << groupwise
                   << " nvfp4=" << nvfp4 << '\n';
-        return 77;
+        return has_5080 ? 0 : 77;
     }
     if (const int result = verify_rejection(); result != 0) { return result; }
     if (const int result = verify_profile_mismatch_rejection(); result != 0) { return result; }

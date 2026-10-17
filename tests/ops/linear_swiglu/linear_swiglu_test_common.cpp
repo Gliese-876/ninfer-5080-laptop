@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ops/linear_swiglu/linear_swiglu_test_common.h"
 
 #include "core/arena.h"
@@ -66,22 +67,29 @@ std::vector<std::uint16_t> make_activation(const Profile& profile, std::int32_t 
     std::vector<std::uint16_t> activation(
         checked_elements(profile.input_rows, tokens, "activation size"), 0);
 
-    // Token zero is dense, so every logical K contributes to every production implementation.
-    // Later tokens use exact zeros plus a rotating set of nonzeros. This keeps a full-output,
-    // full-formula oracle practical at large registered T boundaries without adopting any
-    // production staging or reduction behavior.
+    // Small-T qualification uses varied dense inputs at every token. Large-T
+    // route coverage uses one dense token and sparse later tokens so the same
+    // complete FP64 formula remains practical at registered prefill extents.
+    const bool all_dense = profile.input_pattern == InputPattern::AllDense;
     const bool native_float_weight =
         profile.qtype == QType::NVFP4 || profile.qtype == QType::FP8_E4M3FN_ROW_BF16S;
-    const float dense_scale =
-        profile.qtype == QType::Q4G64_F16S ? 1.25e-4F : (native_float_weight ? 1.0e-3F : 1.0e-5F);
-    for (std::int32_t column = 0; column < profile.input_rows; ++column) {
-        const std::uint64_t mixed = mix64((static_cast<std::uint64_t>(profile.seed) << 32) |
-                                          static_cast<std::uint32_t>(column));
-        int numerator             = static_cast<int>((mixed >> 48) % 63U) - 31;
-        if (numerator == 0) { numerator = (column & 1) == 0 ? 1 : -1; }
-        const float value                            = static_cast<float>(numerator) * dense_scale;
-        activation[static_cast<std::size_t>(column)] = test::f32_to_bf16(value);
+    const float dense_scale = all_dense ? 0.03125F :
+        (profile.qtype == QType::Q4G64_F16S ? 1.25e-4F :
+         (native_float_weight ? 1.0e-3F : 1.0e-5F));
+    const std::int32_t dense_tokens = all_dense ? tokens : 1;
+    for (std::int32_t token = 0; token < dense_tokens; ++token) {
+        for (std::int32_t column = 0; column < profile.input_rows; ++column) {
+            const std::uint64_t coordinate =
+                static_cast<std::uint64_t>(token) * profile.input_rows + column;
+            const std::uint64_t mixed =
+                mix64((static_cast<std::uint64_t>(profile.seed) << 32) | coordinate);
+            int numerator = static_cast<int>((mixed >> 48) % 63U) - 31;
+            if (numerator == 0) { numerator = (column & 1) == 0 ? 1 : -1; }
+            const float value = static_cast<float>(numerator) * dense_scale;
+            activation[static_cast<std::size_t>(coordinate)] = test::f32_to_bf16(value);
+        }
     }
+    if (all_dense) { return activation; }
 
     constexpr std::int32_t kNonzerosPerSparseToken = 4;
     const float sparse_scale =
@@ -215,6 +223,8 @@ int verify_unchanged(std::string_view label, const test::GuardedDeviceBuffer& de
 }
 
 void validate_profile(const Profile& profile) {
+    const bool q3 = profile.qtype == QType::Q3G64_F16S && profile.gate_up_rows == 34816 &&
+                    profile.input_rows == 5120 && profile.output_rows == 17408;
     const bool q4 = profile.qtype == QType::Q4G64_F16S && profile.gate_up_rows == 34816 &&
                     profile.input_rows == 5120 && profile.output_rows == 17408;
     const bool w8_companion = profile.qtype == QType::W8G32_F16S && profile.gate_up_rows == 12288 &&
@@ -226,15 +236,17 @@ void validate_profile(const Profile& profile) {
     const bool fp8 = profile.qtype == QType::FP8_E4M3FN_ROW_BF16S &&
                      profile.gate_up_rows == 34816 && profile.input_rows == 5120 &&
                      profile.output_rows == 17408;
-    if ((!q4 && !w8_companion && !w8_dflash2 && !nvfp4 && !fp8) ||
+    if ((!q3 && !q4 && !w8_companion && !w8_dflash2 && !nvfp4 && !fp8) ||
         profile.gate_up_rows != 2 * profile.output_rows) {
         throw std::invalid_argument("linear_swiglu test: profile is not registered");
     }
-    if ((nvfp4 && profile.activation_compute != ActivationCompute::A16 &&
+    if ((q3 && profile.activation_compute != ActivationCompute::A16 &&
+         profile.activation_compute != ActivationCompute::A8) ||
+        (nvfp4 && profile.activation_compute != ActivationCompute::A16 &&
          profile.activation_compute != ActivationCompute::A4) ||
         (fp8 && profile.activation_compute != ActivationCompute::A16 &&
          profile.activation_compute != ActivationCompute::A8) ||
-        (!nvfp4 && !fp8 && profile.activation_compute != ActivationCompute::A16)) {
+        (!q3 && !nvfp4 && !fp8 && profile.activation_compute != ActivationCompute::A16)) {
         throw std::invalid_argument("linear_swiglu test: invalid activation-compute profile");
     }
 }
@@ -260,6 +272,9 @@ int run_profile(std::string_view label, const Profile& profile,
     const std::int32_t maximum_tokens = token_cases.back();
 
     quantized_weight::PatternedWeightOptions weight_options;
+    if (profile.input_pattern == InputPattern::AllDense) {
+        weight_options.row_split_codes = quantized_weight::RowSplitCodePattern::Hashed;
+    }
     if (profile.qtype == QType::NVFP4) {
         weight_options.weight_scale_divisor = 0.125F;
         weight_options.input_scale_divisor  = 3.5F;

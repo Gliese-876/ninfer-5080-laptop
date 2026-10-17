@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include "core/tensor.h"
@@ -9,6 +10,8 @@
 #include <cstdint>
 
 namespace ninfer::ops::detail {
+
+void q3_small_t_mma_prewarm();
 
 std::size_t q3_linear_swiglu_workspace_capacity_bytes(
     std::int32_t gate_up_rows,

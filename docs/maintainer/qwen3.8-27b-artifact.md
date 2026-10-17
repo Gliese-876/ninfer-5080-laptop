@@ -38,7 +38,7 @@ At startup, `none` and MTP do not materialize DFlash2 weights; DFlash2 does not 
 weights. Vision and DFlash2 may be resident together. The target always materializes `text/output_head`. The full proposal-head route reuses it; the
 optimized route additionally materializes `text/draft_head` and `text/draft_head_token_ids`.
 The Engine accepts startup-fixed `draft_tokens=1..15` (recommended 7), independently of the
-checkpoint’s source block size. See [DFlash2 mathematics and state](qwen3.8-27b-dflash2.md).
+checkpoint’s source block size.
 
 The identity is read from the version-2 artifact directory. The filename, object count, and any
 representative tensor descriptor do not select the model or weights profile.
@@ -913,3 +913,33 @@ python3 -m tools.convert.qwen3_8_27b.convert \
 The converter validates the official and DFlash2 checkpoints, frontend resources, complete object
 plan, and numeric recipes before opening the output, then writes the sibling
 `qwen3_8_27b.ninfer.conversion.json` report.
+
+## 14. RTX 5080 profile: indexed MTP proposal residency
+
+The registered `qwen3.8-27b/groupwise-int-5080` identity binds through
+`Qwen38GroupwiseInt5080`. Its full output head is Q4G64_F16S
+`[248320,5120]`, and its optimized draft head is Q4G64_F16S
+`[131072,5120]`, both using `row-split-k128-v1`. The optimized head preserves
+the ordered shortlist in `text/draft_head_token_ids`; for every local row `r`,
+both its 2560 code bytes and 160 FP16-scale bytes must equal full-head row
+`token_ids[r]` before the runtime can reuse that storage.
+
+Selecting MTP with the optimized proposal head verifies all 131072 row pairs
+on the host during binding. IDs retain the existing uniqueness and valid-token
+domain checks. A byte mismatch raises `ArtifactError` identifying the local and
+full-head rows. On success, `text/draft_head` remains a validated artifact object
+and is not uploaded; its ID map is device resident. The passive model view marks
+the proposal storage as `IndexedOutputRows` and shares the full output head's
+actual `[248320,5120]` view and lifetime. The additional residency is 524288 bytes,
+saving the draft head's 356515840 bytes (340 MiB).
+
+Indexed projection emits BF16 `[131072,T]` in shortlist order. MTP still applies
+local-row argmax to these logits and then remaps the winning row to a global token
+ID. It keeps the original signed-Q4 decoding, stored FP16 scales and A16 arithmetic
+profile. It neither requantizes weights nor changes target verification,
+accept/commit state, KV storage or the weight profile's BPW. The CUDA modules used
+by this projection are made resident before final KV-capacity resolution.
+
+All other artifact profiles and speculative backends retain compact proposal
+storage. This is a residency choice behind the existing `--lm-head-draft` option;
+it does not add an artifact inventory or product switch.

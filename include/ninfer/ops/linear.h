@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include "core/arena.h"
@@ -119,5 +120,30 @@ void linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
  * @param[in] stream CUDA stream on which execution is enqueued.
  */
 void linear(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
+
+/**
+ * @brief Projects through selected rows of a resident Q4 matrix in the supplied row order.
+ *
+ * For each local output row r and input column t, the ideal result is
+ * `sum_k FP32Dequant(source)[row_ids[r],k] * FP32(x[k,t])`. The output is the BF16
+ * approximation under the same A16 criterion as Linear; the independent oracle
+ * decodes signed Q4 with the exact stored FP16 scale and accumulates the complete
+ * dot product in FP64. BF16 output is an explicit observable rounding boundary.
+ *
+ * The registered source is RowSplit Q4G64_F16S [248320,5120], with FP16 scales
+ * and no padding in K. x is contiguous 16-byte-aligned BF16 [5120,T], out is
+ * contiguous 16-byte-aligned BF16 [131072,T], and every positive T is supported.
+ * row_ids is contiguous 4-byte-aligned I32 [131072], with distinct values in
+ * [0,248077). Artifact binding establishes its value range and uniqueness.
+ * Source shape and planes describe the complete resident matrix, not a compact
+ * reinterpretation. Rows [248077,248320) are never selected.
+ *
+ * x, row_ids and both source planes are preserved; out is completely overwritten.
+ * All live inputs, weight planes and output must be disjoint. No transient
+ * workspace, persistent state, internal device allocation or host synchronization
+ * is required; execution may be captured in a CUDA Graph.
+ */
+void linear_gather_rows(const Tensor& x, const Weight& source, const Tensor& row_ids,
+                         Tensor& out, cudaStream_t stream);
 
 } // namespace ninfer::ops

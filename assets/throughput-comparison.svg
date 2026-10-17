@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="900pt" height="525pt" viewBox="0 0 900 525" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Portable Matplotlib throughput figure</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 525
+L 900 525
+L 900 0
+L 0 0
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="line2d_1">
+    <path d="M 83.25 412.5
+L 858 412.5
+" clip-path="url(#pe8df883014)" style="fill: none; stroke: #ccd3dc; stroke-linecap: square"/>
+   </g>
+   <g id="line2d_2">
+    <path d="M 83.25 317.357143
+L 858 317.357143
+" clip-path="url(#pe8df883014)" style="fill: none; stroke: #e8ecf1; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="line2d_3">
+    <path d="M 83.25 222.214286
+L 453.375 222.214286
+" clip-path="url(#pe8df883014)" style="fill: none; stroke: #e8ecf1; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="line2d_4">
+    <path d="M 521.625 222.214286
+L 858 222.214286
+" clip-path="url(#pe8df883014)" style="fill: none; stroke: #e8ecf1; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="line2d_5">
+    <path d="M 83.25 127.071429
+L 191.859375 127.071429
+" clip-path="url(#pe8df883014)" style="fill: none; stroke: #e8ecf1; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="line2d_6">
+    <path d="M 273.140625 127.071429
+L 576 127.071429
+" clip-path="url(#pe8df883014)" style="fill: none; stroke: #e8ecf1; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="line2d_7">
+    <path d="M 654 127.071429
+L 858 127.071429
+" clip-path="url(#pe8df883014)" style="fill: none; stroke: #e8ecf1; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="desktop_original">
+    <path d="M 178.5 412.5
+L 286.5 412.5
+Q 295.5 412.5 295.5 403.5
+L 295.5 154.588607
+Q 295.5 145.588607 286.5 145.588607
+L 178.5 145.588607
+Q 169.5 145.588607 169.5 154.588607
+L 169.5 403.5
+Q 169.5 412.5 178.5 412.5
+z
+" clip-path="url(#pe8df883014)" style="fill: #bfc5ce"/>
+   </g>
+   <g id="laptop_baseline">
+    <path d="M 433.5 412.5
+L 541.5 412.5
+Q 550.5 412.5 550.5 403.5
+L 550.5 260.125805
+Q 550.5 251.125805 541.5 251.125805
+L 433.5 251.125805
+Q 424.5 251.125805 424.5 260.125805
+L 424.5 403.5
+Q 424.5 412.5 433.5 412.5
+z
+" clip-path="url(#pe8df883014)" style="fill: #8993a3"/>
+   </g>
+   <g id="laptop_optimized">
+    <path d="M 688.5 412.5
+L 796.5 412.5
+Q 805.5 412.5 805.5 403.5
+L 805.5 197.211718
+Q 805.5 188.211718 796.5 188.211718
+L 688.5 188.211718
+Q 679.5 188.211718 679.5 197.211718
+L 679.5 403.5
+Q 679.5 412.5 688.5 412.5
+z
+" clip-path="url(#pe8df883014)" style="fill: #1769e8"/>
+   </g>
+   <g id="text_1">
+    <text style="font-size: 14.25px; font-family: 'Noto Sans'; text-anchor: end; fill: #566173" x="68.25" y="416.205" transform="rotate(-0 68.25 416.205)">0</text>
+   </g>
+   <g id="text_2">
+    <text style="font-size: 14.25px; font-family: 'Noto Sans'; text-anchor: end; fill: #566173" x="68.25" y="321.062143" transform="rotate(-0 68.25 321.062143)">40</text>
+   </g>
+   <g id="text_3">
+    <text style="font-size: 14.25px; font-family: 'Noto Sans'; text-anchor: end; fill: #566173" x="68.25" y="225.919286" transform="rotate(-0 68.25 225.919286)">80</text>
+   </g>
+   <g id="text_4">
+    <text style="font-size: 14.25px; font-family: 'Noto Sans'; text-anchor: end; fill: #566173" x="68.25" y="130.776429" transform="rotate(-0 68.25 130.776429)">120</text>
+   </g>
+   <g id="text_5">
+    <text style="font-size: 16.5px; font-family: 'Noto Sans'; text-anchor: start; fill: #566173" x="83.25" y="65.79" transform="rotate(-0 83.25 65.79)">tok/s</text>
+   </g>
+   <g id="text_6">
+    <text style="font-size: 18px; font-family: 'Noto Sans'; text-anchor: middle; fill: #172132" x="232.5" y="453.93" transform="rotate(-0 232.5 453.93)">RTX 5080 Desktop</text>
+   </g>
+   <g id="text_7">
+    <text style="font-size: 15px; font-family: 'Noto Sans'; text-anchor: middle; fill: #566173" x="232.5" y="477.15" transform="rotate(-0 232.5 477.15)">ninfer-5080 v1.5 · MTP-3</text>
+   </g>
+   <g id="text_8">
+    <text style="font-size: 18px; font-family: 'Noto Sans'; text-anchor: middle; fill: #172132" x="487.5" y="453.93" transform="rotate(-0 487.5 453.93)">RTX 5080 Laptop</text>
+   </g>
+   <g id="text_9">
+    <text style="font-size: 15px; font-family: 'Noto Sans'; text-anchor: middle; fill: #566173" x="487.5" y="477.15" transform="rotate(-0 487.5 477.15)">Baseline · MTP-3</text>
+   </g>
+   <g id="text_10">
+    <text style="font-size: 18px; font-family: 'Noto Sans'; text-anchor: middle; fill: #172132" x="742.5" y="453.93" transform="rotate(-0 742.5 453.93)">RTX 5080 Laptop</text>
+   </g>
+   <g id="text_11">
+    <text style="font-weight: 700; font-size: 15px; font-family: 'Noto Sans'; text-anchor: middle; fill: #1769e8" x="742.5" y="477.157031" transform="rotate(-0 742.5 477.157031)">Optimized · MTP-4</text>
+   </g>
+   <g id="laptop-throughput-improvement">
+    <path d="M 560.25 239.125805
+Q 591.092647 166.058761 667.53233 175.925465
+" clip-path="url(#pe8df883014)" style="fill: none; stroke: #1769e8; stroke-width: 2; stroke-linecap: round"/>
+    <path d="M 661.594641 171.93249
+L 667.53233 175.925465
+L 660.775337 178.279831
+z
+" clip-path="url(#pe8df883014)" style="fill: #1769e8; stroke: #1769e8; stroke-width: 2; stroke-linecap: round"/>
+   </g>
+   <g id="text_12">
+    <text style="font-weight: 700; font-size: 22.5px; font-family: 'Noto Sans'; text-anchor: middle; fill: #172132" x="232.5" y="125.938607" transform="rotate(-0 232.5 125.938607)">112.22</text>
+   </g>
+   <g id="text_13">
+    <text style="font-weight: 700; font-size: 22.5px; font-family: 'Noto Sans'; text-anchor: middle; fill: #172132" x="487.5" y="231.475805" transform="rotate(-0 487.5 231.475805)">67.85</text>
+   </g>
+   <g id="text_14">
+    <text style="font-weight: 700; font-size: 22.5px; font-family: 'Noto Sans'; text-anchor: middle; fill: #1769e8" x="742.5" y="168.561718" transform="rotate(-0 742.5 168.561718)">94.30</text>
+   </g>
+   <g id="text_15">
+    <text style="font-weight: 700; font-size: 19.5px; font-family: 'Noto Sans'; text-anchor: middle; fill: #1769e8" x="615" y="139.281718" transform="rotate(-0 615 139.281718)">+39.0%</text>
+   </g>
+  </g>
+  <g id="text_16">
+   <text style="font-weight: 700; font-size: 24px; font-family: 'Noto Sans'; text-anchor: start; fill: #172132" x="83.25" y="34.74" transform="rotate(-0 83.25 34.74)">Qwen3.8-27B · 118K Decode Throughput</text>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="pe8df883014">
+   <rect x="0" y="0" width="900" height="525"/>
+  </clipPath>
+ </defs>
+</svg>

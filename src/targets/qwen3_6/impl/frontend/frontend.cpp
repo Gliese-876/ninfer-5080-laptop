@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include <ninfer/targets/qwen3_6/frontend.h>
 
 #include <ninfer/targets/qwen3_6/frontend_resources.h>
@@ -1002,7 +1003,7 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
         const fi::RenderedChat rendered =
             impl_->chat_template.render(messages, render_options(options, impl_->prefix_checkpoint_policy));
         const auto tokenize_started = Clock::now();
-        fi::EncodedChat encoded     = fi::encode_rendered_chat(*impl_->tokenizer, rendered);
+        fi::EncodedChat encoded     = fi::encode_rendered_chat(*impl_->tokenizer, rendered, true);
         result.prepare.tokenize_seconds =
             std::chrono::duration<double>(Clock::now() - tokenize_started).count();
         fi::check_preparation_control(control, "tokenization");
@@ -1032,7 +1033,7 @@ std::uint32_t Frontend::count_tokens(PromptInput input, const PreparationControl
         const fi::RenderedChat rendered =
             impl_->chat_template.render(messages, render_options(options, impl_->prefix_checkpoint_policy));
         const std::uint32_t count =
-            checked_token_count(impl_->tokenizer->encode(rendered.text).size());
+            checked_token_count(impl_->tokenizer->encode_cached(rendered.text).size());
         fi::check_preparation_control(control, "tokenization");
         return count;
     }

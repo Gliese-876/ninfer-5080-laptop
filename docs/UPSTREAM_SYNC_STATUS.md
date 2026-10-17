@@ -1,3 +1,5 @@
+> Record from [toddballinger/ninfer-5080](https://github.com/toddballinger/ninfer-5080). The [project README](../README.md) describes the laptop implementation.
+
 # Upstream Sync Status
 
 This fork selectively integrates changes from [Neroued/ninfer](https://github.com/Neroued/ninfer) rather than attempting to remain commit-for-commit identical with upstream.

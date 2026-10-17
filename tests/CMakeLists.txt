@@ -1,3 +1,4 @@
+# Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # This target deliberately receives no src/, CUDA, artifact, kernel, or target
@@ -98,6 +99,9 @@ set_tests_properties(
   ninfer_state_store_test
   PROPERTIES SKIP_RETURN_CODE 77)
 # Family frontend and one opt-in real-artifact prefix/MTP integration test.
+ninfer_add_test(ninfer_tokenization_cache_test
+  SOURCES targets/qwen3_6/test_tokenization_cache.cpp
+  LIBRARIES ninfer_engine ninfer_core)
 ninfer_add_test(ninfer_qwen3_6_frontend_test
   SOURCES targets/qwen3_6/test_frontend.cpp
   NEEDS_SOURCE_DIR
@@ -293,10 +297,18 @@ ninfer_add_op_test(ninfer_linear_topk_test
   SOURCES ops/test_linear_topk.cu
   LIBRARIES ninfer_ops)
 
+ninfer_add_op_test(ninfer_linear_indexed_rows_test
+  SOURCES ops/test_linear_indexed_rows.cpp
+  LIBRARIES ninfer_ops)
+
+ninfer_add_op_test(ninfer_quant_bf16_decode_test
+  SOURCES ops/test_quant_bf16_decode.cu
+  LIBRARIES CUDA::cudart)
+
 # Stateful, fused, and exact-shape Ops remain central even when the current implementation domain
 # is one checkpoint/device.
 ninfer_add_op_test(ninfer_gqa_attention_test
-  SOURCES ops/test_gqa_attention.cpp
+  SOURCES ops/test_gqa_attention.cpp ops/gqa_q4_prompt_control.cu ops/gqa_q4_decode_control.cu
   LIBRARIES ninfer_ops)
 ninfer_add_op_test(ninfer_bidirectional_gqa_attention_test
   SOURCES ops/test_bidirectional_gqa_attention.cpp
@@ -335,6 +347,11 @@ ninfer_add_op_test(ninfer_speculative_round_test
   SOURCES ops/test_speculative_round.cpp
   LIBRARIES ninfer_ops)
 ninfer_add_linear_test(ninfer_linear_q4_a16_test ops/linear/test_q4_a16.cpp)
+ninfer_add_op_test(ninfer_shared_code_padding_test
+  SOURCES ops/test_shared_code_padding.cu
+          ops/linear/linear_test_common.cpp
+          ops/linear_swiglu/linear_swiglu_test_common.cpp
+  LIBRARIES ninfer_ops)
 ninfer_add_linear_test(ninfer_linear_q5_a16_test ops/linear/test_q5_a16.cpp)
 ninfer_add_linear_test(ninfer_linear_q6_a16_test ops/linear/test_q6_a16.cpp)
 ninfer_add_linear_test(ninfer_linear_w8_a16_test ops/linear/test_w8_a16.cpp)
@@ -363,6 +380,20 @@ ninfer_add_op_test(ninfer_gdn_input_proj_conv_snapshot_test
 ninfer_add_op_test(ninfer_gdn_input_proj_conv_record_test
   SOURCES ops/test_gdn_input_proj_conv_record.cpp
   LIBRARIES ninfer_ops)
+
+ninfer_add_op_test(ninfer_q5_small_t_exact_test
+  SOURCES ops/test_q5_small_t_exact.cpp ops/q5_small_t_codec_test.cu
+  LIBRARIES ninfer_ops)
+ninfer_add_op_test(ninfer_q5_small_t_exact_t4_test
+  SOURCES ops/test_q5_small_t_exact.cpp ops/q5_small_t_codec_test.cu
+  LIBRARIES ninfer_ops)
+target_compile_definitions(ninfer_q5_small_t_exact_t4_test PRIVATE
+  NINFER_Q5_EXACT_TEST_TOKENS=4)
+ninfer_add_op_test(ninfer_q5_small_t_exact_t6_test
+  SOURCES ops/test_q5_small_t_exact.cpp ops/q5_small_t_codec_test.cu
+  LIBRARIES ninfer_ops)
+target_compile_definitions(ninfer_q5_small_t_exact_t6_test PRIVATE
+  NINFER_Q5_EXACT_TEST_TOKENS=6)
 ninfer_add_op_test(ninfer_gated_delta_net_replay_record_test
   SOURCES ops/test_gated_delta_net_replay_record.cpp
   LIBRARIES ninfer_ops)

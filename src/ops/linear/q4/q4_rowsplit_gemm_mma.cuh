@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 // Q4G64 RowSplit x BF16 Tensor Core GEMM.
@@ -90,7 +91,7 @@ __device__ __forceinline__ int q4_mma_swizzle_k64(int row, int col) {
 }
 
 // clang-format off
-template <class Schedule_, bool Full>
+template <class Schedule_, bool Full, bool VectorDecode = false>
 __global__ __launch_bounds__(Schedule_::kThreads, Schedule_::kLaunchBoundsMinBlocks)
 void q4_rowsplit_gemm_mma_kernel(
     const __nv_bfloat16* __restrict__ x,
@@ -275,22 +276,53 @@ void q4_rowsplit_gemm_mma_kernel(
     };
 
     auto decode_weight = [&](int stage, int k_tile) {
-        const int scale_group = (k_tile * BK) / Q4RowSplitStorage::kGroupK;
-        for (int local_row = warp; local_row < BM; local_row += Schedule::kWarps) {
-            auto* dst = &As[local_row * BK];
-#pragma unroll
-            for (int group = 0; group < GPB; ++group) {
-                const int staged_group = local_row * GPB + group;
-                const std::uint8_t* scale_ptr =
-                    &Sr[stage][staged_group * SB + (Schedule::kScaleLoadMode == Q4ScaleLoad::Pair32
-                                                        ? ((scale_group + group) & 1) *
-                                                              Q4RowSplitStorage::kScaleBytesPerGroup
-                                                        : 0)];
-                const __nv_bfloat162 weights =
-                    Q4MmaDecodeAtom::decode_pair(Cr[stage], scale_ptr, staged_group, lane);
-                const int shared_col =
-                    q4_mma_swizzle_k64(local_row, group * Q4RowSplitStorage::kGroupK + 2 * lane);
-                store_vec(&dst[shared_col], weights);
+        if constexpr (VectorDecode) {
+            const int scale_group = (k_tile * BK) / Q4RowSplitStorage::kGroupK;
+            // Each warp decodes four rows instead of one. A word load covers
+            // eight consecutive signed Q4 codes, with four rows spanning all
+            // 32 shared banks. The exact integer-valued half decode precedes
+            // the same FP32 scale product and BF16 rounding as the scalar atom.
+            for (int item = tid; item < BM * GPB * 8; item += Schedule::kThreads) {
+                const int staged_group = item >> 3;
+                const int chunk = item & 7;
+                const int local_row = staged_group / GPB;
+                const int group = staged_group - local_row * GPB;
+                const auto* scale_ptr = &Sr[stage][staged_group * SB +
+                    (Schedule::kScaleLoadMode == Q4ScaleLoad::Pair32 ?
+                    ((scale_group + group) & 1) * Q4RowSplitStorage::kScaleBytesPerGroup : 0)];
+                const auto scale_bits = *reinterpret_cast<const std::uint16_t*>(scale_ptr);
+                const auto packed = *reinterpret_cast<const std::uint32_t*>(
+                    &Cr[stage][staged_group * Q4RowSplitStorage::kCodeBytesPerGroup + chunk * 4]);
+                float weights[8];
+                Q4SimtDecodeAtom::decode_eight(packed, scale_bits, weights);
+                // A 128-bit store keeps each eight-lane row within one shared
+                // transaction. Four scalar pair stores would repeat banks over
+                // the four rows owned by a warp.
+                const int4 bf16 = make_int4(pack_bf16x2(weights[0], weights[1]),
+                                            pack_bf16x2(weights[2], weights[3]),
+                                            pack_bf16x2(weights[4], weights[5]),
+                                            pack_bf16x2(weights[6], weights[7]));
+                const int col = group * Q4RowSplitStorage::kGroupK + chunk * 8;
+                store_vec(&As[local_row * BK + q4_mma_swizzle_k64(local_row, col)], bf16);
+            }
+        } else {
+            const int scale_group = (k_tile * BK) / Q4RowSplitStorage::kGroupK;
+            for (int local_row = warp; local_row < BM; local_row += Schedule::kWarps) {
+                auto* dst = &As[local_row * BK];
+    #pragma unroll
+                for (int group = 0; group < GPB; ++group) {
+                    const int staged_group = local_row * GPB + group;
+                    const std::uint8_t* scale_ptr =
+                        &Sr[stage][staged_group * SB + (Schedule::kScaleLoadMode == Q4ScaleLoad::Pair32
+                                                            ? ((scale_group + group) & 1) *
+                                                                  Q4RowSplitStorage::kScaleBytesPerGroup
+                                                            : 0)];
+                    const __nv_bfloat162 weights =
+                        Q4MmaDecodeAtom::decode_pair(Cr[stage], scale_ptr, staged_group, lane);
+                    const int shared_col =
+                        q4_mma_swizzle_k64(local_row, group * Q4RowSplitStorage::kGroupK + 2 * lane);
+                    store_vec(&dst[shared_col], weights);
+                }
             }
         }
     };

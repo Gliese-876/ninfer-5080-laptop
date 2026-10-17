@@ -125,6 +125,13 @@ Speculative decoding is disabled by default. Select MTP with one to five draft p
 35B-A3B text-only DFlash backend with one to fifteen. `--lm-head-draft` selects the optimized
 proposal head and requires a selected backend:
 
+For `qwen3.8-27b/groupwise-int-5080` with MTP, this option reads the shortlist's
+rows from the resident Q4 output head after verifying every packed code and scale
+row against the artifact's draft head. Only the 0.5 MiB token-id map is additionally
+resident, saving 340 MiB of duplicate weights. An unequal row rejects startup;
+other profiles and backends keep their compact draft-head storage. Shortlist
+order, BF16 logits, local argmax ties and global-token remapping are unchanged.
+
 ```bash
 ./build/apps/ninfer models/qwen3_6_35b_a3b.ninfer \
   --prompt "Write a short explanation of speculative decoding." \

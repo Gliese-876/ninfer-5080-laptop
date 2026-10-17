@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include <ninfer/targets/qwen3_6_27b/package.h>
@@ -147,6 +148,7 @@ struct BindingPlan {
     WeightPlan output_head;
     artifact::ObjectHandle draft_head;
     artifact::ObjectHandle draft_head_token_ids;
+    qwen3_6::ProposalHeadStorage proposal_head_storage = qwen3_6::ProposalHeadStorage::Compact;
     MtpPlan mtp;
     std::optional<DFlash2Plan> dflash2;
 
@@ -164,6 +166,12 @@ struct ArtifactLoadPlan {
 
 ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_profile,
                                qwen3_6::StartupFeatures features);
+
+// The heads are already bound as Q4 row-split tensors and the token IDs as I32.
+void validate_indexed_proposal_head(const artifact::Binder& binder,
+                                    artifact::ObjectHandle output_head,
+                                    artifact::ObjectHandle draft_head,
+                                    artifact::ObjectHandle token_ids);
 
 struct DensePostMixerPayload {
     Weight gate_up;

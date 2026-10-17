@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ops/attn_input_proj/q4_q5/q4_q5_attn_input_kernels.h"
 
 #include "core/device.h"
@@ -10,6 +11,7 @@
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemv.cuh"
 #include "ops/linear/q5/q5_rowsplit_rowblock_small_t.cuh"
+#include "ops/linear/q5/q5_small_t_mma.cuh"
 
 #include <cuda_bf16.h>
 
@@ -143,6 +145,12 @@ void launch_q4_ksplit_band(const Tensor& x, const Weight& weight,
                            Tensor& q, Tensor& key,
                            cudaStream_t stream) {
     switch (x.ne[1]) {
+    case 5:
+        launch_q4_ksplit_exact<Geometry, 5>(x, weight, q, key, stream);
+        return;
+    case 6:
+        launch_q4_ksplit_exact<Geometry, 6>(x, weight, q, key, stream);
+        return;
     case 7:
         launch_q4_ksplit_exact<Geometry, 7>(x, weight, q, key, stream);
         return;
@@ -163,7 +171,7 @@ void launch_q4_ksplit_band(const Tensor& x, const Weight& weight,
         return;
     default:
         throw std::invalid_argument(
-            "attention Q4 K-split band requires T in [7,12]");
+            "attention Q4 K-split band requires T in [5,12]");
     }
 }
 
@@ -177,9 +185,16 @@ void launch_q4(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key, cu
     case 2:
     case 3:
     case 4:
+        launch_q4_simt_route<Geometry, Q4AttnSimtR8C4Schedule>(x, weight, q, key, stream);
+        return;
+
     case 5:
     case 6:
-        launch_q4_simt_route<Geometry, Q4AttnSimtR8C4Schedule>(x, weight, q, key, stream);
+        if constexpr (Geometry::kHidden == 5120) {
+            launch_q4_ksplit_band<Geometry>(x, weight, q, key, stream);
+        } else {
+            launch_q4_simt_route<Geometry, Q4AttnSimtR8C4Schedule>(x, weight, q, key, stream);
+        }
         return;
 
     case 7:
@@ -361,6 +376,42 @@ void launch_q5_rowblock(const Tensor& x, const Weight& weight,
 template <class Geometry>
 void launch_q5(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& value,
                cudaStream_t stream) {
+    if constexpr (Geometry::kHidden == 5120) {
+        if (x.ne[1] >= 4 && x.ne[1] <= 6) {
+            const Q5SmallTStridedStore<Geometry::kSplitRow> store{
+                static_cast<__nv_bfloat16*>(gate.data),
+                static_cast<int>(gate.nb[1] / sizeof(__nv_bfloat16)),
+                static_cast<__nv_bfloat16*>(value.data),
+                static_cast<int>(value.nb[1] / sizeof(__nv_bfloat16))};
+            if (x.ne[1] == 4) {
+                q5_small_t_mma_kernel<Geometry::kParentRows, 4,
+                                      Q5SmallTStridedStore<Geometry::kSplitRow>>
+                    <<<Geometry::kParentRows / 16, 256, 0, stream>>>(
+                        static_cast<const __nv_bfloat16*>(x.data),
+                        static_cast<const std::uint8_t*>(weight.qdata),
+                        static_cast<const std::uint8_t*>(weight.qhigh),
+                        static_cast<const std::uint8_t*>(weight.scales), store);
+            } else if (x.ne[1] == 5) {
+                q5_small_t_mma_kernel<Geometry::kParentRows, 5,
+                                      Q5SmallTStridedStore<Geometry::kSplitRow>>
+                    <<<Geometry::kParentRows / 16, 256, 0, stream>>>(
+                        static_cast<const __nv_bfloat16*>(x.data),
+                        static_cast<const std::uint8_t*>(weight.qdata),
+                        static_cast<const std::uint8_t*>(weight.qhigh),
+                        static_cast<const std::uint8_t*>(weight.scales), store);
+            } else {
+                q5_small_t_mma_kernel<Geometry::kParentRows, 6,
+                                      Q5SmallTStridedStore<Geometry::kSplitRow>>
+                    <<<Geometry::kParentRows / 16, 256, 0, stream>>>(
+                        static_cast<const __nv_bfloat16*>(x.data),
+                        static_cast<const std::uint8_t*>(weight.qdata),
+                        static_cast<const std::uint8_t*>(weight.qhigh),
+                        static_cast<const std::uint8_t*>(weight.scales), store);
+            }
+            CUDA_CHECK(cudaGetLastError());
+            return;
+        }
+    }
     if (x.ne[1] == 1) {
         launch_q5_gemv<Geometry>(x, weight, gate, value, stream);
         return;
@@ -514,6 +565,12 @@ void q4_q5_attn_input_small_t_launch(const Tensor& x, const Weight& query_key_we
 
 void q4_q5_attn_input_small_t_prewarm() {
     cudaFuncAttributes attr{};
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr, q5_small_t_mma_kernel<7168, 4, Q5SmallTStridedStore<6144>>));
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr, q5_small_t_mma_kernel<7168, 5, Q5SmallTStridedStore<6144>>));
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr, q5_small_t_mma_kernel<7168, 6, Q5SmallTStridedStore<6144>>));
 
     // Qwen3.8 / Geometry27 Q4 attention-input path.
     CUDA_CHECK(cudaFuncGetAttributes(
@@ -523,6 +580,16 @@ void q4_q5_attn_input_small_t_prewarm() {
             false,
             true,
             AttnInputGeometry27::kSplitRow>));
+
+    // Both Q4 query/key and Q4 gate/value use these strided-seam instances.
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr,
+        q4_small_t_mma_kernel<Q4LinearGeometry<7168, 5120>, 8, 5,
+                              Q4KSplitStridedStore<true, 6144>, Q4SmallTMmaIdentityRows>));
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr,
+        q4_small_t_mma_kernel<Q4LinearGeometry<7168, 5120>, 8, 6,
+                              Q4KSplitStridedStore<true, 6144>, Q4SmallTMmaIdentityRows>));
 
     // Qwen3.8 / Geometry27 Q5 attention-input path.
     //

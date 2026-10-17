@@ -2,6 +2,10 @@
 
 These rules apply to the whole repository.
 
+This fork targets the RTX 5080 Laptop GPU with 16 GB VRAM and 60 SMs.
+Retain the inherited NInfer contracts; evaluate new performance work on this laptop target.
+The root bilingual README and docs/benchmark-methodology.md define the current release profile.
+
 ## Governing objective
 
 Complete the user's explicit deliverable within the applicable product contract. For the declared
@@ -135,7 +139,7 @@ prepared prompt carries no exact-target tag.
 ## Performance target and feature-start gate
 
 NInfer is currently optimized aggressively for the production hot path on NVIDIA GeForce RTX 5080
-16 GB, Compute Capability 12.0 (`sm_120a`). The RTX 5080 result is the current performance decision
+16 GB, Compute Capability 12.0 (`sm_120a`). The RTX 5080 Laptop result is the current performance decision
 criterion.
 
 For every performance-sensitive feature or implementation change, establish before implementation:

@@ -1,3 +1,5 @@
+> Record from [toddballinger/ninfer-5080](https://github.com/toddballinger/ninfer-5080). The [project README](../README.md) describes the laptop implementation.
+
 # Qwen3.8-27B RTX 5080 128K + Vision v1.5
 
 v1.5 is the current production-qualified RTX 5080 runtime for Qwen3.8-27B. It moves the project to **CUDA 13.4.92 / NVIDIA 615.71.09**, retunes the Q3/A8 large-prefill SwiGLU path for Blackwell/CC 12.0, and standardizes release performance reporting on `ninfer_bench`.

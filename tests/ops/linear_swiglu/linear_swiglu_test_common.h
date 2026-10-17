@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #pragma once
 
 #include "core/tensor.h"
@@ -14,6 +15,11 @@ enum class ActivationCompute : std::uint8_t {
     A4,
 };
 
+enum class InputPattern : std::uint8_t {
+    DenseFirstToken,
+    AllDense,
+};
+
 struct Profile {
     QType qtype;
     std::int32_t gate_up_rows;
@@ -21,6 +27,7 @@ struct Profile {
     std::int32_t output_rows;
     std::uint32_t seed;
     ActivationCompute activation_compute;
+    InputPattern input_pattern = InputPattern::DenseFirstToken;
 };
 
 int run_profile(std::string_view label, const Profile& profile,

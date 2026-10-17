@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 // ninfer::ops - gqa_attention prompt-scale launcher: fill k/v at device
 // positions then launch causal attention over absolute cached history.
 #include "ops/launcher/gqa_attention.h"
@@ -6,6 +7,7 @@
 #include "ops/kernel/gqa_attention_prefill_bf16.cuh"
 #include "ops/kernel/gqa_attention_prefill_i8.cuh"
 #include "ops/kernel/gqa_attention_prefill_q4.cuh"
+#include "ops/kernel/gqa_attention_prefill_q4_pipeline384.cuh"
 #include "ops/kernel/gqa_attention_prefill_q2.cuh"
 #include "core/device.h" // CUDA_CHECK
 
@@ -34,8 +36,14 @@ void gqa_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& po
 
     static const cudaError_t attr_q4 =
         cudaFuncSetAttribute(gqa_attention_prefill_q4_kernel<Geometry, Metadata>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillI8SmemBytes);
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillQ4SmemBytes);
     CUDA_CHECK(attr_q4);
+    if constexpr (Geometry::QHeads == 24 && Geometry::KVHeads == 4) {
+        static const cudaError_t attr_pipeline = cudaFuncSetAttribute(
+            q4_prompt_384::kernel<Metadata, 168>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillQ4SmemBytes);
+        CUDA_CHECK(attr_pipeline);
+    }
 
     const auto tokens = static_cast<std::int32_t>(q.ne[2]);
 
@@ -60,15 +68,27 @@ void gqa_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& po
         const Tensor& cache_k_scale = cache.k_scale_pages;
         const Tensor& cache_v_scale = cache.v_scale_pages;
 
-        gqa_attention_prefill_q4_kernel<Geometry, Metadata>
-            <<<attention_grid, kGqaPrefillI8Threads, kGqaPrefillI8SmemBytes, stream>>>(
-                static_cast<const __nv_bfloat16*>(q.data),
-                static_cast<const std::uint8_t*>(cache_k.data),
-                static_cast<const std::uint8_t*>(cache_v.data),
-                static_cast<const __half*>(cache_k_scale.data),
-                static_cast<const __half*>(cache_v_scale.data), metadata,
-                static_cast<const std::int32_t*>(positions.data), scale,
-                static_cast<__nv_bfloat16*>(out.data), tokens);
+        if constexpr (Geometry::QHeads == 24 && Geometry::KVHeads == 4) {
+            q4_prompt_384::kernel<Metadata, 168>
+                <<<attention_grid, q4_prompt_384::kThreads, kGqaPrefillQ4SmemBytes, stream>>>(
+                    static_cast<const __nv_bfloat16*>(q.data),
+                    static_cast<const std::uint8_t*>(cache_k.data),
+                    static_cast<const std::uint8_t*>(cache_v.data),
+                    static_cast<const __half*>(cache_k_scale.data),
+                    static_cast<const __half*>(cache_v_scale.data), metadata,
+                    static_cast<const std::int32_t*>(positions.data), scale,
+                    static_cast<__nv_bfloat16*>(out.data), tokens);
+        } else {
+            gqa_attention_prefill_q4_kernel<Geometry, Metadata>
+                <<<attention_grid, kGqaPrefillI8Threads, kGqaPrefillQ4SmemBytes, stream>>>(
+                    static_cast<const __nv_bfloat16*>(q.data),
+                    static_cast<const std::uint8_t*>(cache_k.data),
+                    static_cast<const std::uint8_t*>(cache_v.data),
+                    static_cast<const __half*>(cache_k_scale.data),
+                    static_cast<const __half*>(cache_v_scale.data), metadata,
+                    static_cast<const std::int32_t*>(positions.data), scale,
+                    static_cast<__nv_bfloat16*>(out.data), tokens);
+        }
 
     } else {
         const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kGqaPrefillBr)),
@@ -237,6 +257,16 @@ void gqa_kv_append_launch_for(const Tensor& k, const Tensor& v, const Tensor& po
 void gqa_q4_prefill_prewarm() {
     cudaFuncAttributes attr{};
 
+    CUDA_CHECK(cudaFuncSetAttribute(
+        q4_prompt_384::kernel<GqaPrefillDirectMetadata, 168>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillQ4SmemBytes));
+    CUDA_CHECK(cudaFuncSetAttribute(
+        q4_prompt_384::kernel<GqaPrefillBatchMetadata<false>, 168>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillQ4SmemBytes));
+    CUDA_CHECK(cudaFuncSetAttribute(
+        q4_prompt_384::kernel<GqaPrefillBatchMetadata<true>, 168>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillQ4SmemBytes));
+
     // --------------------------------------------------------
     // Q4 prompt-attention kernels requiring enlarged dynamic SMEM.
     // --------------------------------------------------------
@@ -246,21 +276,21 @@ void gqa_q4_prefill_prewarm() {
             Gqa27Geometry,
             GqaPrefillDirectMetadata>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
-        kGqaPrefillI8SmemBytes));
+        kGqaPrefillQ4SmemBytes));
 
     CUDA_CHECK(cudaFuncSetAttribute(
         gqa_attention_prefill_q4_kernel<
             Gqa27Geometry,
             GqaPrefillBatchMetadata<false>>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
-        kGqaPrefillI8SmemBytes));
+        kGqaPrefillQ4SmemBytes));
 
     CUDA_CHECK(cudaFuncSetAttribute(
         gqa_attention_prefill_q4_kernel<
             Gqa27Geometry,
             GqaPrefillBatchMetadata<true>>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
-        kGqaPrefillI8SmemBytes));
+        kGqaPrefillQ4SmemBytes));
 
 
     // --------------------------------------------------------

@@ -1,3 +1,4 @@
+// Modified for the RTX 5080 Laptop fork; see CHANGELOG.md.
 #include "ninfer/ops/linear.h"
 
 #include "ops/linear/bf16/bf16_config.h"
@@ -11,6 +12,7 @@
 #include "ops/linear/w8/w8_dispatch.h"
 
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -163,6 +165,59 @@ void linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
 void linear(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     validate_linear_semantics(x, w, out, LinearPolicy::A16Only);
     dispatch_linear(x, w, out, LinearPolicy::A16Only, nullptr, stream);
+}
+
+void linear_gather_rows(const Tensor& x, const Weight& source, const Tensor& row_ids,
+                         Tensor& out, cudaStream_t stream) {
+    constexpr std::int32_t kSourceRows = 248320;
+    constexpr std::int32_t kSelectedRows = 131072;
+    constexpr std::int32_t kHidden = 5120;
+    const bool valid_source =
+        source.qtype == QType::Q4G64_F16S && source.layout == QuantLayout::RowSplit &&
+        source.scale_dtype == DType::FP16 && source.group_size == 64 && source.group == 64 &&
+        source.ndim == 2 && source.n == kSourceRows && source.k == kHidden &&
+        source.shape[0] == kSourceRows && source.shape[1] == kHidden &&
+        source.padded_shape[0] == kSourceRows && source.padded_shape[1] == kHidden &&
+        source.qhigh == nullptr && source.high_plane_bytes == 0 &&
+        aligned_to(source.qdata, 16) && aligned_to(source.scales, 16);
+    if (!valid_source) {
+        throw std::invalid_argument("linear_gather_rows: invalid Q4 source profile");
+    }
+    (void)checked_numel(x, "gather input");
+    (void)checked_numel(out, "gather output");
+    if (x.dtype != DType::BF16 || x.ne[0] != kHidden || x.ne[2] != 1 || x.ne[3] != 1 ||
+        !x.is_contiguous() || !aligned_to(x.data, 16)) {
+        throw std::invalid_argument("linear_gather_rows: invalid BF16 input [5120,T]");
+    }
+    if (out.dtype != DType::BF16 || out.ne[0] != kSelectedRows || out.ne[1] != x.ne[1] ||
+        out.ne[2] != 1 || out.ne[3] != 1 || !out.is_contiguous() || !aligned_to(out.data, 16)) {
+        throw std::invalid_argument("linear_gather_rows: invalid BF16 output [131072,T]");
+    }
+    if (row_ids.dtype != DType::I32 || row_ids.ne[0] != kSelectedRows ||
+        row_ids.ne[1] != 1 || row_ids.ne[2] != 1 || row_ids.ne[3] != 1 ||
+        !row_ids.is_contiguous() || !aligned_to(row_ids.data, 4)) {
+        throw std::invalid_argument("linear_gather_rows: invalid I32 row ids [131072]");
+    }
+    struct Range {
+        const void* data;
+        std::size_t bytes;
+    };
+    const Range ranges[]{
+        {x.data, x.bytes()},
+        {row_ids.data, row_ids.bytes()},
+        {out.data, out.bytes()},
+        {source.qdata, static_cast<std::size_t>(kSourceRows) * kHidden / 2},
+        {source.scales, static_cast<std::size_t>(kSourceRows) * (kHidden / 64) * 2}};
+    for (std::size_t i = 0; i < std::size(ranges); ++i) {
+        const auto begin = reinterpret_cast<std::uintptr_t>(ranges[i].data);
+        for (std::size_t j = 0; j < i; ++j) {
+            const auto other = reinterpret_cast<std::uintptr_t>(ranges[j].data);
+            if (begin < other + ranges[j].bytes && other < begin + ranges[i].bytes) {
+                throw std::invalid_argument("linear_gather_rows: live buffers overlap");
+            }
+        }
+    }
+    detail::launch_q4_gather_rows(x, source, row_ids, out, stream);
 }
 
 } // namespace ninfer::ops
